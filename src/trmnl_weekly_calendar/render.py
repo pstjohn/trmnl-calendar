@@ -24,8 +24,11 @@ MOCK_WEEK_START = date(2026, 6, 7)
 ROBOTO_SERIF = FONT_DIR / "RobotoSerif.ttf"
 ROBOTO_FLEX = FONT_DIR / "RobotoFlex.ttf"
 CLIMACONS = FONT_DIR / "climacons-webfont.ttf"
+LIBERATION_SANS = Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
 DAY_START_HOUR = 6.0
 DAY_END_HOUR = 20.0
+CURRENT_DAY_FILL = 238
+MAX_EVENT_FILL_GRAY = 226
 
 
 CSS_PX_TO_POINTS = 72 / 96
@@ -63,7 +66,12 @@ def variation_weight(variation: str | None) -> int | None:
     return VARIATION_WEIGHTS.get(variation.removesuffix(" Italic"))
 
 
-def apply_browser_optical_size(loaded: ImageFont.FreeTypeFont, size: int, variation: str | None) -> None:
+def apply_optical_size(
+    loaded: ImageFont.FreeTypeFont,
+    size: int,
+    variation: str | None,
+    optical_size: float | None = None,
+) -> None:
     try:
         axes = loaded.get_variation_axes()
     except OSError:
@@ -75,7 +83,8 @@ def apply_browser_optical_size(loaded: ImageFont.FreeTypeFont, size: int, variat
         value = float(axis["default"])
         name = axis_name(axis)
         if name == "Optical Size":
-            value = clamp_axis_value(float(size) * CSS_PX_TO_POINTS, axis)
+            target_optical_size = optical_size if optical_size is not None else float(size) * CSS_PX_TO_POINTS
+            value = clamp_axis_value(target_optical_size, axis)
         elif name == "Weight" and weight is not None:
             value = clamp_axis_value(float(weight), axis)
         values.append(value)
@@ -86,12 +95,17 @@ def apply_browser_optical_size(loaded: ImageFont.FreeTypeFont, size: int, variat
         return
 
 
+def apply_browser_optical_size(loaded: ImageFont.FreeTypeFont, size: int, variation: str | None) -> None:
+    apply_optical_size(loaded, size, variation)
+
+
 def font(
     path: str | Path,
     size: int,
     variation: str | None = None,
     *,
     browser_optical_size: bool = False,
+    optical_size: float | None = None,
 ) -> ImageFont.FreeTypeFont:
     loaded = ImageFont.truetype(str(path), size, layout_engine=FONT_LAYOUT_ENGINE)
     if variation:
@@ -99,9 +113,22 @@ def font(
             loaded.set_variation_by_name(variation)
         except OSError:
             pass
-    if browser_optical_size:
+    if optical_size is not None:
+        apply_optical_size(loaded, size, variation, optical_size)
+    elif browser_optical_size:
         apply_browser_optical_size(loaded, size, variation)
     return loaded
+
+
+def first_existing_font(candidates: tuple[Path, ...], fallback: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return fallback
+
+
+MONTH_EVENT_FONT = first_existing_font((LIBERATION_SANS,), ROBOTO_FLEX)
+MONTH_EVENT_OPTICAL_SIZE = 14 if MONTH_EVENT_FONT == ROBOTO_FLEX else None
 
 
 F = {
@@ -109,13 +136,15 @@ F = {
     "meta": font(ROBOTO_FLEX, 25, "Regular", browser_optical_size=True),
     "day": font(ROBOTO_SERIF, 36, "Bold"),
     "date": font(ROBOTO_SERIF, 31, "Regular"),
-    "weather": font(ROBOTO_FLEX, 23, "Regular", browser_optical_size=True),
-    "time": font(ROBOTO_SERIF, 24, "Bold"),
-    "event": font(ROBOTO_FLEX, 23, "Regular", browser_optical_size=True),
-    "event_small": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
+    "weather": font(ROBOTO_FLEX, 26, "Regular", browser_optical_size=True),
+    "time": font(ROBOTO_SERIF, 27, "Bold"),
+    "event": font(ROBOTO_FLEX, 26, "Regular", browser_optical_size=True),
+    "event_small": font(ROBOTO_FLEX, 22, "Regular", browser_optical_size=True),
     "current": font(ROBOTO_SERIF, 31, "Bold"),
-    "now": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
-    "tiny": font(ROBOTO_FLEX, 18, "Regular", browser_optical_size=True),
+    "now": font(ROBOTO_FLEX, 22, "Regular", browser_optical_size=True),
+    "tiny": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
+    "month_event": font(MONTH_EVENT_FONT, 20, "Regular", optical_size=MONTH_EVENT_OPTICAL_SIZE),
+    "month_tiny": font(MONTH_EVENT_FONT, 18, "Regular", optical_size=MONTH_EVENT_OPTICAL_SIZE),
 }
 
 
@@ -231,6 +260,10 @@ def rounded_rect(
     width: int = 1,
 ) -> None:
     draw.rounded_rectangle(tuple(round(v) for v in xy), radius=radius, fill=fill, outline=outline, width=width)
+
+
+def event_fill(tone: int) -> int:
+    return min(MAX_EVENT_FILL_GRAY, max(0, tone))
 
 
 def draw_hatching(img: Image.Image, xy: tuple[int, int, int, int], step: int = 11, fill: int = 206) -> None:
@@ -383,7 +416,6 @@ def render_image(
 
     # Day headings with weather tucked beneath each printed date.
     day_top = top
-    draw.line((grid_left, day_top, grid_right, day_top), fill=0, width=2)
     current_day = local_now.date()
     highlighted_day = (current_day - week_start).days if week_start <= current_day <= week_start + timedelta(days=6) else -1
     for i, (dow, date_label, _kind, _temp) in enumerate(days):
@@ -391,29 +423,27 @@ def render_image(
         x0 = col_edges[i]
         x1 = col_edges[i + 1]
         if i == highlighted_day:
-            draw.rectangle((x0 + 2, day_top + 2, x1 - 2, grid_bottom), fill=248)
-            draw_hatching(img, (x0 + 2, day_top + 2, x1 - 2, grid_bottom), step=20, fill=230)
+            draw.rectangle((x0 + 2, day_top + 2, x1 - 2, grid_bottom), fill=CURRENT_DAY_FILL)
             rounded_rect(draw, (x0 + 24, day_top + 24, x1 - 24, day_top + 74), 3, fill=0)
             draw_centered(draw, (x0, day_top + 24, x1, day_top + 74), f"{dow} {date_label}", F["day"], fill=255, y_offset=-1)
         else:
             draw_centered(draw, (x0, day_top + 24, x1, day_top + 74), f"{dow} {date_label}", F["day"], fill=0, y_offset=-1)
         draw_weather_icon(draw, kind, round((x0 + x1) / 2), day_top + 122, 0.74)
         draw_centered(draw, (x0, day_top + 165, x1, day_top + 198), temp, F["weather"], fill=0)
-        if i < 6:
-            draw.line((x1, day_top + 18, x1, grid_bottom), fill=216, width=1)
 
     # All-day event band.
     all_day_top = day_top + 212
-    row_h = 30
+    row_h = 34
+    row_gap = 6
     for all_day in all_day_events:
         x0 = col_edges[all_day.start_day] + card_inset_x
         x1 = col_edges[all_day.end_day + 1] - card_inset_x
-        y0 = all_day_top + all_day.row * (row_h + 8)
+        y0 = all_day_top + all_day.row * (row_h + row_gap)
         y1 = y0 + row_h
-        rounded_rect(draw, (x0, y0, x1, y1), 5, fill=all_day.tone)
-        label = ellipsize(draw, all_day.title, F["event_small"], round(x1 - x0 - text_pad_x))
-        _, lh = text_wh(draw, label, F["event_small"])
-        draw.text((x0 + text_pad_x / 2, y0 + (row_h - lh) / 2 - 2), label, font=F["event_small"], fill=0)
+        rounded_rect(draw, (x0, y0, x1, y1), 5, fill=event_fill(all_day.tone))
+        label = ellipsize(draw, all_day.title, F["event"], round(x1 - x0 - text_pad_x))
+        _, lh = text_wh(draw, label, F["event"])
+        draw.text((x0 + text_pad_x / 2, y0 + (row_h - lh) / 2 - 2), label, font=F["event"], fill=0)
     # Time grid.
     for hour in range(int(DAY_START_HOUR), int(DAY_END_HOUR) + 1):
         y = round(time_y(hour, grid_top, grid_bottom))
@@ -434,7 +464,7 @@ def render_image(
         y1 = time_y(visible_end, grid_top, grid_bottom) - card_inset_y
         if y1 - y0 < 34:
             y0 = max(grid_top + card_inset_y, y1 - 34)
-        rounded_rect(draw, (x0, y0, x1, y1), 5, fill=ev.tone)
+        rounded_rect(draw, (x0, y0, x1, y1), 5, fill=event_fill(ev.tone))
         start_h = int(visible_start)
         start_m = int(round((visible_start - start_h) * 60))
         end_h = int(visible_end)

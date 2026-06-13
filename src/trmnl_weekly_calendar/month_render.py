@@ -7,20 +7,28 @@ from PIL import Image, ImageDraw
 
 from trmnl_weekly_calendar.calendar_data import MonthEvent
 from trmnl_weekly_calendar.render import (
+    CURRENT_DAY_FILL,
     F,
     H,
     W,
     draw_centered,
-    draw_hatching,
     ellipsize,
+    event_fill,
     localize_now,
     rounded_rect,
     start_of_week,
     text_wh,
+    wrap,
 )
 
 
 MONTH_WEEK_ROWS = 5
+MONTH_EVENT_ROW_H = 27
+MONTH_EVENT_ROW_GAP = 6
+MONTH_EVENT_LINE_STEP = 20
+MONTH_EVENT_MAX_LINES = 3
+MONTH_EVENT_TOP_OFFSET = 52
+MONTH_TODAY_EVENT_TOP_OFFSET = 58
 
 
 def render_month_image(
@@ -58,7 +66,6 @@ def render_month_image(
     meta = "MONTH"
     meta_w, meta_h = text_wh(draw, meta, F["meta"])
     draw.text((grid_right - meta_w, top + 31 - meta_h / 2), meta, font=F["meta"], fill=80)
-    draw.line((grid_left, top + title_h, grid_right, top + title_h), fill=0, width=2)
 
     for i, label in enumerate(("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")):
         draw_centered(draw, (col_edges[i], top + title_h, col_edges[i + 1], grid_top), label, F["day"], fill=0)
@@ -82,12 +89,10 @@ def render_month_image(
             if not in_month:
                 draw.rectangle((x0 + 1, y0 + 1, x1 - 1, y1 - 1), fill=251)
             if is_today:
-                draw.rectangle((x0 + 2, y0 + 2, x1 - 2, y1 - 2), fill=248)
-                draw_hatching(img, (x0 + 2, y0 + 2, x1 - 2, y1 - 2), step=18, fill=230)
+                draw.rectangle((x0 + 2, y0 + 2, x1 - 2, y1 - 2), fill=CURRENT_DAY_FILL)
 
-            draw.rectangle((x0, y0, x1, y1), outline=216, width=1)
             draw_day_number(draw, cell_day, x0, y0, is_today, in_month)
-            draw_month_events(draw, events_by_day.get(cell_day, []), x0, y0, x1, y1, cell_pad)
+            draw_month_events(draw, events_by_day.get(cell_day, []), x0, y0, x1, y1, cell_pad, is_today)
 
     return img
 
@@ -108,7 +113,7 @@ def draw_day_number(
     if is_today:
         text_x = x0 + 20
         bbox = draw.textbbox((text_x, text_y), label, font=date_font)
-        rounded_rect(draw, (bbox[0] - 9, bbox[1] - 6, bbox[2] + 10, bbox[3] + 9), 3, fill=0)
+        rounded_rect(draw, (bbox[0] - 7, bbox[1] - 4, bbox[2] + 8, bbox[3] + 6), 3, fill=0)
         draw.text((text_x, text_y), label, font=date_font, fill=255)
         return
     draw.text((text_x, text_y), label, font=date_font, fill=fill)
@@ -122,32 +127,91 @@ def draw_month_events(
     x1: int,
     y1: int,
     cell_pad: int,
+    is_today: bool = False,
 ) -> None:
     if not events:
         return
 
-    event_top = y0 + 52
-    row_h = 27
-    row_gap = 6
+    event_top = y0 + (MONTH_TODAY_EVENT_TOP_OFFSET if is_today else MONTH_EVENT_TOP_OFFSET)
     available_h = y1 - event_top - 14
-    max_rows = max(1, int((available_h + row_gap) // (row_h + row_gap)))
+    max_rows = max(1, int((available_h + MONTH_EVENT_ROW_GAP) // (MONTH_EVENT_ROW_H + MONTH_EVENT_ROW_GAP)))
     visible = events[:max_rows]
-    remaining = len(events) - len(visible)
-    if remaining and max_rows > 1:
+    hidden_count = len(events) - len(visible)
+    if hidden_count and max_rows > 1:
         visible = events[: max_rows - 1]
+        hidden_count = len(events) - len(visible)
 
     text_x = x0 + cell_pad + 8
     max_w = x1 - text_x - cell_pad - 8
-    for i, event in enumerate(visible):
-        row_y = event_top + i * (row_h + row_gap)
-        rounded_rect(draw, (x0 + cell_pad, row_y, x1 - cell_pad, row_y + row_h), 4, fill=event.tone)
-        label = event.title if not event.time_label else f"{event.time_label} {event.title}"
-        clipped = ellipsize(draw, label, F["event_small"], max_w)
-        _, label_h = text_wh(draw, clipped, F["event_small"])
-        draw.text((text_x, row_y + (row_h - label_h) / 2 - 2), clipped, font=F["event_small"], fill=0)
+    labels = [event.title if not event.time_label else f"{event.time_label} {event.title}" for event in visible]
+    line_counts = month_event_line_counts(draw, labels, max_w, available_h, bool(hidden_count))
 
-    if remaining:
-        more = f"+{remaining + 1} more"
-        clipped = ellipsize(draw, more, F["tiny"], max_w)
-        row_y = event_top + len(visible) * (row_h + row_gap) + 1
-        draw.text((text_x, min(row_y, y1 - 30)), clipped, font=F["tiny"], fill=70)
+    row_y = event_top
+    for event, label, line_count in zip(visible, labels, line_counts):
+        row_h = month_event_row_height(line_count)
+        rounded_rect(
+            draw,
+            (x0 + cell_pad, row_y, x1 - cell_pad, row_y + row_h),
+            4,
+            fill=event_fill(event.tone),
+        )
+        lines = month_event_lines(draw, label, max_w, line_count)
+        lines_h = line_count * MONTH_EVENT_LINE_STEP
+        text_y = row_y + (row_h - lines_h) / 2
+        for line in lines:
+            draw.text((text_x, text_y - 2), line, font=F["month_event"], fill=0)
+            text_y += MONTH_EVENT_LINE_STEP
+        row_y += row_h + MONTH_EVENT_ROW_GAP
+
+    if hidden_count:
+        more = f"+{hidden_count} more"
+        clipped = ellipsize(draw, more, F["month_tiny"], max_w)
+        draw.text((text_x, min(row_y + 1, y1 - 30)), clipped, font=F["month_tiny"], fill=70)
+
+
+def month_event_line_counts(
+    draw: ImageDraw.ImageDraw,
+    labels: list[str],
+    max_w: int,
+    available_h: float,
+    has_more: bool,
+) -> list[int]:
+    line_counts = [1 for _label in labels]
+    more_h = MONTH_EVENT_ROW_H + MONTH_EVENT_ROW_GAP if has_more else 0
+    used_h = month_events_height(line_counts) + more_h
+    spare_h = available_h - used_h
+    if spare_h < MONTH_EVENT_LINE_STEP:
+        return line_counts
+
+    for index, label in enumerate(labels):
+        if text_wh(draw, label, F["month_event"])[0] <= max_w:
+            continue
+        wrapped = wrap(draw, label, F["month_event"], max_w)
+        target_lines = min(MONTH_EVENT_MAX_LINES, max(1, len(wrapped)))
+        while line_counts[index] < target_lines and spare_h >= MONTH_EVENT_LINE_STEP:
+            line_counts[index] += 1
+            spare_h -= MONTH_EVENT_LINE_STEP
+    return line_counts
+
+
+def month_events_height(line_counts: list[int]) -> int:
+    if not line_counts:
+        return 0
+    return sum(month_event_row_height(line_count) for line_count in line_counts) + MONTH_EVENT_ROW_GAP * (len(line_counts) - 1)
+
+
+def month_event_row_height(line_count: int) -> int:
+    return MONTH_EVENT_ROW_H + (line_count - 1) * MONTH_EVENT_LINE_STEP
+
+
+def month_event_lines(draw: ImageDraw.ImageDraw, label: str, max_w: int, max_lines: int) -> list[str]:
+    if max_lines <= 1:
+        return [ellipsize(draw, label, F["month_event"], max_w)]
+
+    lines = wrap(draw, label, F["month_event"], max_w)
+    if len(lines) <= max_lines:
+        return lines
+
+    clipped = lines[:max_lines]
+    clipped[-1] = ellipsize(draw, " ".join(lines[max_lines - 1 :]), F["month_event"], max_w)
+    return clipped

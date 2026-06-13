@@ -68,17 +68,20 @@ By default, the server renders the mock events. Set `TRMNL_GOG_COMMAND` to fetch
 
 ```bash
 export GOG_ACCOUNT='you@example.com'
-export TRMNL_GOG_COMMAND='gog calendar events primary --account {account} --from {start} --to {end} --json --no-input'
+export TRMNL_GOG_CALENDARS='Peter St. John=primary,Corbin=Corbin,Family=Family'
+export TRMNL_GOG_COMMAND='gog calendar events {calendar} --account {account} --from {start} --to {end} --json --no-input'
 export TRMNL_PUBLIC_BASE_URL='https://your-public-host.example.com'
 serve-trmnl-calendar
 ```
 
 Adjust the `gog` arguments to match the CLI you use. The command template supports `{start}`, `{end}`, `{start_datetime}`, `{end_datetime}`, and `{account}` from `GOG_ACCOUNT`.
+When `TRMNL_GOG_CALENDARS` is set, it is a comma-separated list of `display label=calendar id or name` entries, and the command template must include `{calendar}`.
 
 For the local Hermes setup, use:
 
 ```bash
-export TRMNL_GOG_COMMAND='gog calendar events primary --account {account} --from {start} --to {end} --all-pages --json --no-input'
+export TRMNL_GOG_CALENDARS='Peter St. John=primary,Corbin=Corbin,Family=Family'
+export TRMNL_GOG_COMMAND='gog calendar events {calendar} --account {account} --from {start} --to {end} --all-pages --json --no-input'
 ```
 
 The parser accepts common Google Calendar shapes such as top-level arrays, `items`, `events`, or `data`, with `summary`, `location`, `start.dateTime`, `start.date`, `end.dateTime`, and `end.date`.
@@ -93,9 +96,11 @@ TRMNL_REFRESH_SECONDS=900
 TRMNL_CALENDAR_DATA_TTL_SECONDS=7200
 TRMNL_TIMEZONE=America/Denver
 TRMNL_IMAGE_MODE=4bit
+TRMNL_GOG_CALENDARS=Peter St. John=primary,Corbin=Corbin,Family=Family
 ```
 
 `TRMNL_IMAGE_MODE=4bit` writes a packed PNG with bit depth `4` and grayscale color type `0`.
+Calendar event fills are assigned from `TRMNL_GOG_CALENDARS` labels: `Peter St. John`, `Corbin`, and `Family` each render with a stable gray fill.
 
 For TRMNL Redirect, configure the plugin Web Address to:
 
