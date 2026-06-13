@@ -355,7 +355,8 @@ def render_image(
                 draw.text((tx, ty), line, font=F["event"], fill=0)
                 ty += 28
             if ev.where and y1 - ty > 22:
-                draw.text((tx, ty + 1), ev.where, font=F["event_small"], fill=70)
+                location = ellipsize(draw, ev.where, F["event_small"], max_w)
+                draw.text((tx, ty + 1), location, font=F["event_small"], fill=70)
 
     marker_day, marker_hour = current_marker(week_start, now)
     marker_y = round(time_y(marker_hour, grid_top, grid_bottom))
