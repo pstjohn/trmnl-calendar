@@ -19,6 +19,8 @@ MOCK_WEEK_START = date(2026, 6, 7)
 ROBOTO_SERIF = FONT_DIR / "RobotoSerif.ttf"
 ROBOTO_FLEX = FONT_DIR / "RobotoFlex.ttf"
 CLIMACONS = FONT_DIR / "climacons-webfont.ttf"
+DAY_START_HOUR = 6.0
+DAY_END_HOUR = 20.0
 
 
 def font(path: str | Path, size: int, variation: str | None = None) -> ImageFont.FreeTypeFont:
@@ -54,8 +56,17 @@ def configured_now() -> datetime:
     return datetime.now(configured_zone())
 
 
+def localize_now(now: datetime | None = None) -> datetime:
+    zone = configured_zone()
+    if now is None:
+        return datetime.now(zone)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=zone)
+    return now.astimezone(zone)
+
+
 def configured_today() -> date:
-    return configured_now().date()
+    return localize_now().date()
 
 
 @dataclass
@@ -217,7 +228,7 @@ def short_clock(hour: float) -> str:
 
 
 def time_y(hour: float, top: int, bottom: int) -> float:
-    return top + (hour - 6.0) / 16.0 * (bottom - top)
+    return top + (hour - DAY_START_HOUR) / (DAY_END_HOUR - DAY_START_HOUR) * (bottom - top)
 
 
 def start_of_week(today: date | None = None, first_weekday: int = 6) -> date:
@@ -252,7 +263,7 @@ def allocate_all_day_rows(events: list[AllDayEvent]) -> list[AllDayEvent]:
 
 
 def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, float]:
-    now = now or configured_now()
+    now = localize_now(now)
     week_end = week_start + timedelta(days=6)
     if week_start <= now.date() <= week_end:
         day = (now.date() - week_start).days
@@ -260,9 +271,9 @@ def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, 
         rounded = round(minutes / 15) * 15
         hour = rounded / 60
     else:
-        day = min(6, max(0, (configured_today() - week_start).days))
-        hour = 6.0
-    return day, min(22, max(6, hour))
+        day = min(6, max(0, (now.date() - week_start).days))
+        hour = DAY_START_HOUR
+    return day, min(DAY_END_HOUR, max(DAY_START_HOUR, hour))
 
 
 def render_image(
@@ -273,6 +284,7 @@ def render_image(
     events: list[Event] | None = None,
     now: datetime | None = None,
 ) -> Image.Image:
+    local_now = localize_now(now)
     days = days or days_for_week(week_start)
     all_day_events = allocate_all_day_rows(all_day_events if all_day_events is not None else MOCK_ALL_DAY_EVENTS)
     events = events if events is not None else MOCK_EVENTS
@@ -301,7 +313,7 @@ def render_image(
     # Day headings with weather tucked beneath each printed date.
     day_top = top
     draw.line((grid_left, day_top, grid_right, day_top), fill=0, width=2)
-    current_day = (now or configured_now()).date()
+    current_day = local_now.date()
     highlighted_day = (current_day - week_start).days if week_start <= current_day <= week_start + timedelta(days=6) else -1
     for i, (dow, date_label, _kind, _temp) in enumerate(days):
         dow, date_label, kind, temp = days[i]
@@ -332,7 +344,7 @@ def render_image(
         _, lh = text_wh(draw, label, F["event_small"])
         draw.text((x0 + text_pad_x / 2, y0 + (row_h - lh) / 2 - 2), label, font=F["event_small"], fill=0)
     # Time grid.
-    for hour in range(6, 23):
+    for hour in range(int(DAY_START_HOUR), int(DAY_END_HOUR) + 1):
         y = round(time_y(hour, grid_top, grid_bottom))
         label = f"{hour % 12 or 12}{'a' if hour < 12 else 'p'}"
         tw, th = text_wh(draw, label, F["time"])
@@ -340,23 +352,28 @@ def render_image(
 
     # Events.
     for ev in sorted(events, key=lambda event: (event.day, event.start, event.end, event.title)):
+        visible_start = max(DAY_START_HOUR, ev.start)
+        visible_end = min(DAY_END_HOUR, ev.end)
+        if visible_end <= DAY_START_HOUR or visible_start >= DAY_END_HOUR or visible_end <= visible_start:
+            continue
+
         x0 = col_edges[ev.day] + card_inset_x
         x1 = col_edges[ev.day + 1] - card_inset_x
-        y0 = time_y(ev.start, grid_top, grid_bottom) + card_inset_y
-        y1 = time_y(ev.end, grid_top, grid_bottom) - card_inset_y
+        y0 = time_y(visible_start, grid_top, grid_bottom) + card_inset_y
+        y1 = time_y(visible_end, grid_top, grid_bottom) - card_inset_y
         if y1 - y0 < 34:
-            y1 = y0 + 34
+            y0 = max(grid_top + card_inset_y, y1 - 34)
         rounded_rect(draw, (x0, y0, x1, y1), 5, fill=ev.tone)
-        start_h = int(ev.start)
-        start_m = int(round((ev.start - start_h) * 60))
-        end_h = int(ev.end)
-        end_m = int(round((ev.end - end_h) * 60))
+        start_h = int(visible_start)
+        start_m = int(round((visible_start - start_h) * 60))
+        end_h = int(visible_end)
+        end_m = int(round((visible_end - end_h) * 60))
         time_text = f"{start_h % 12 or 12}:{start_m:02d}-{end_h % 12 or 12}:{end_m:02d}"
         tx = x0 + text_pad_x
         max_w = round(x1 - tx - text_pad_x)
         box_h = y1 - y0
         if box_h < 68:
-            compact_time = f"{short_clock(ev.start)}-{short_clock(ev.end)}"
+            compact_time = f"{short_clock(visible_start)}-{short_clock(visible_end)}"
             compact = f"{compact_time} {ev.title}"
             line = ellipsize(draw, compact, F["event_small"], max_w)
             _, lh = text_wh(draw, line, F["event_small"])
@@ -372,7 +389,7 @@ def render_image(
                 location = ellipsize(draw, ev.where, F["event_small"], max_w)
                 draw.text((tx, ty + 1), location, font=F["event_small"], fill=70)
 
-    marker_day, marker_hour = current_marker(week_start, now)
+    marker_day, marker_hour = current_marker(week_start, local_now)
     marker_y = round(time_y(marker_hour, grid_top, grid_bottom))
     marker_x0 = col_edges[marker_day] + card_inset_x
     marker_x1 = col_edges[marker_day + 1] - card_inset_x
@@ -394,7 +411,6 @@ def render_image(
             ],
             fill=0,
         )
-
     return img
 
 

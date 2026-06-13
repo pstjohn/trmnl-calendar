@@ -55,9 +55,13 @@ serve-trmnl-calendar
 The server exposes:
 
 ```text
-GET /trmnl.json  Redirect plugin JSON
-GET /image.png   PNG image for Redirect or Alias
-GET /healthz     Health check
+GET /weekly/trmnl.json  Weekly Redirect plugin JSON
+GET /weekly/image.png   Weekly PNG image for Redirect or Alias
+GET /month/trmnl.json   Month Redirect plugin JSON
+GET /month/image.png    Month PNG image for Redirect or Alias
+GET /trmnl.json         Legacy weekly Redirect plugin JSON
+GET /image.png          Legacy weekly PNG image
+GET /healthz            Health check
 ```
 
 By default, the server renders the mock events. Set `TRMNL_GOG_COMMAND` to fetch live Google Calendar JSON with `gog`. The command is a template; `{start}` is the week start date and `{end}` is the exclusive week end date.
@@ -93,7 +97,8 @@ TRMNL_IMAGE_MODE=4bit
 For TRMNL Redirect, configure the plugin Web Address to:
 
 ```text
-https://your-public-host.example.com/trmnl.json
+https://your-public-host.example.com/weekly/trmnl.json
+https://your-public-host.example.com/month/trmnl.json
 ```
 
 For Alias testing, configure the Image URL to:

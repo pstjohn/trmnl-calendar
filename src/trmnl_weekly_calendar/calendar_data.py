@@ -4,14 +4,32 @@ import json
 import os
 import shlex
 import subprocess
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from trmnl_weekly_calendar.render import AllDayEvent, Event, MOCK_ALL_DAY_EVENTS, MOCK_EVENTS
+from trmnl_weekly_calendar.render import (
+    DAY_END_HOUR,
+    DAY_START_HOUR,
+    AllDayEvent,
+    Event,
+    MOCK_ALL_DAY_EVENTS,
+    MOCK_EVENTS,
+    MOCK_WEEK_START,
+)
 
 
 TONE_STEPS = [238, 232, 240, 235, 242, 228, 244, 229, 226, 241, 234]
+
+
+@dataclass(frozen=True)
+class MonthEvent:
+    day: date
+    title: str
+    time_label: str = ""
+    tone: int = 238
+    sort_minutes: int = 0
 
 
 def load_events(week_start: date) -> tuple[list[Event], list[AllDayEvent], str]:
@@ -19,24 +37,34 @@ def load_events(week_start: date) -> tuple[list[Event], list[AllDayEvent], str]:
     if not command_template:
         return MOCK_EVENTS, MOCK_ALL_DAY_EVENTS, "mock"
 
-    payload = run_gog(command_template, week_start)
+    payload = run_gog(command_template, week_start, week_start + timedelta(days=7))
     raw_events = extract_event_list(payload)
     events, all_day_events = parse_events(raw_events, week_start, local_zone())
     return events, all_day_events, "gog"
 
 
-def run_gog(command_template: str, week_start: date) -> Any:
-    end = week_start + timedelta(days=7)
+def load_month_events(month_start: date) -> tuple[list[MonthEvent], str]:
+    month_end = next_month(month_start)
+    command_template = os.environ.get("TRMNL_GOG_COMMAND", "").strip()
+    if not command_template:
+        return mock_month_events(month_start), "mock"
+
+    payload = run_gog(command_template, month_start, month_end)
+    raw_events = extract_event_list(payload)
+    return parse_month_events(raw_events, month_start, month_end, local_zone()), "gog"
+
+
+def run_gog(command_template: str, range_start: date, range_end: date) -> Any:
     account = os.environ.get("GOG_ACCOUNT", "").strip()
     if "{account}" in command_template and not account:
         raise RuntimeError("TRMNL_GOG_COMMAND uses {account}, but GOG_ACCOUNT is not set")
 
     values = {
         "account": account,
-        "start": week_start.isoformat(),
-        "end": end.isoformat(),
-        "start_datetime": datetime.combine(week_start, time.min).isoformat(),
-        "end_datetime": datetime.combine(end, time.min).isoformat(),
+        "start": range_start.isoformat(),
+        "end": range_end.isoformat(),
+        "start_datetime": datetime.combine(range_start, time.min).isoformat(),
+        "end_datetime": datetime.combine(range_end, time.min).isoformat(),
     }
     command = shlex.split(command_template.format(**values))
     result = subprocess.run(command, capture_output=True, check=True, text=True, timeout=30)
@@ -108,14 +136,86 @@ def parse_events(raw_events: list[dict[str, Any]], week_start: date, tz: ZoneInf
             segment_end = min(end_dt, day_end)
             if segment_start >= segment_end:
                 continue
-            start_hour = max(6.0, hour_float(segment_start))
+            start_hour = max(DAY_START_HOUR, hour_float(segment_start))
             raw_end_hour = 24.0 if segment_end == day_end else hour_float(segment_end)
-            end_hour = min(22.0, raw_end_hour)
-            if end_hour <= 6.0 or start_hour >= 22.0:
+            end_hour = min(DAY_END_HOUR, raw_end_hour)
+            if end_hour <= DAY_START_HOUR or start_hour >= DAY_END_HOUR:
                 continue
-            timed.append(Event(day_offset, start_hour, max(start_hour + 0.25, end_hour), title, location, tone))
+            timed.append(Event(day_offset, start_hour, end_hour, title, location, tone))
 
     return timed, all_day
+
+
+def parse_month_events(raw_events: list[dict[str, Any]], month_start: date, month_end: date, tz: ZoneInfo) -> list[MonthEvent]:
+    events: list[MonthEvent] = []
+
+    for index, raw in enumerate(raw_events):
+        title = clean_text(raw.get("summary") or raw.get("title") or raw.get("name") or "Untitled")
+        start_value = first_value(raw, "start", "startTime", "start_time", "starts_at", "begin")
+        end_value = first_value(raw, "end", "endTime", "end_time", "ends_at", "finish")
+        if start_value is None:
+            continue
+
+        start, start_is_all_day = parse_temporal(start_value, tz)
+        end, end_is_all_day = parse_temporal(end_value, tz) if end_value is not None else (start, start_is_all_day)
+        tone = TONE_STEPS[index % len(TONE_STEPS)]
+
+        if start_is_all_day or end_is_all_day:
+            start_day = start if isinstance(start, date) and not isinstance(start, datetime) else start.date()
+            end_day = end if isinstance(end, date) and not isinstance(end, datetime) else end.date()
+            exclusive_end = end_day if end_day > start_day else start_day + timedelta(days=1)
+            for day in date_range(max(start_day, month_start), min(exclusive_end, month_end)):
+                events.append(MonthEvent(day, title, tone=tone))
+            continue
+
+        start_dt = ensure_datetime(start, tz)
+        end_dt = ensure_datetime(end, tz)
+        if end_dt <= start_dt:
+            end_dt = start_dt + timedelta(minutes=30)
+        for day in date_range(max(start_dt.date(), month_start), min(end_dt.date() + timedelta(days=1), month_end)):
+            day_start = datetime.combine(day, time.min, tz)
+            day_end = day_start + timedelta(days=1)
+            segment_start = max(start_dt, day_start)
+            segment_end = min(end_dt, day_end)
+            if segment_start >= segment_end:
+                continue
+            events.append(MonthEvent(day, title, format_month_time(segment_start), tone, segment_start.hour * 60 + segment_start.minute))
+
+    return sorted(events, key=month_event_sort_key)
+
+
+def mock_month_events(month_start: date) -> list[MonthEvent]:
+    month_end = next_month(month_start)
+    events: list[MonthEvent] = []
+    for event in MOCK_ALL_DAY_EVENTS:
+        start_day = MOCK_WEEK_START + timedelta(days=event.start_day)
+        end_day = MOCK_WEEK_START + timedelta(days=event.end_day + 1)
+        for day in date_range(max(start_day, month_start), min(end_day, month_end)):
+            events.append(MonthEvent(day, event.title, tone=event.tone))
+
+    for event in MOCK_EVENTS:
+        day = MOCK_WEEK_START + timedelta(days=event.day)
+        if month_start <= day < month_end:
+            events.append(MonthEvent(day, event.title, short_time_label(event.start), event.tone, int(event.start * 60)))
+
+    return sorted(events, key=month_event_sort_key)
+
+
+def next_month(value: date) -> date:
+    if value.month == 12:
+        return date(value.year + 1, 1, 1)
+    return date(value.year, value.month + 1, 1)
+
+
+def date_range(start: date, end: date):
+    day = start
+    while day < end:
+        yield day
+        day += timedelta(days=1)
+
+
+def month_event_sort_key(event: MonthEvent) -> tuple[date, bool, int, str]:
+    return event.day, bool(event.time_label), event.sort_minutes, event.title
 
 
 def first_value(raw: dict[str, Any], *keys: str) -> Any:
@@ -161,6 +261,20 @@ def ensure_datetime(value: datetime | date, tz: ZoneInfo) -> datetime:
 
 def hour_float(value: datetime) -> float:
     return value.hour + value.minute / 60 + value.second / 3600
+
+
+def format_month_time(value: datetime) -> str:
+    return short_time_label(value.hour + value.minute / 60)
+
+
+def short_time_label(hour: float) -> str:
+    h = int(hour)
+    m = int(round((hour - h) * 60))
+    suffix = "a" if h < 12 else "p"
+    label_hour = h % 12 or 12
+    if m == 0:
+        return f"{label_hour}{suffix}"
+    return f"{label_hour}:{m:02d}{suffix}"
 
 
 def local_zone() -> ZoneInfo:

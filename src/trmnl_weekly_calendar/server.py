@@ -10,13 +10,24 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from threading import RLock
-from urllib.parse import urlparse
+from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
-from trmnl_weekly_calendar.calendar_data import load_events
+from PIL import Image
+
+from trmnl_weekly_calendar.calendar_data import load_events, load_month_events
+from trmnl_weekly_calendar.month_render import render_month_image
 from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
 
 
 DEFAULT_REFRESH_SECONDS = 15 * 60
+
+
+@dataclass
+class CalendarPlugin:
+    name: str
+    filename_prefix: str
+    render: Callable[[datetime], tuple[Image.Image, str]]
 
 
 @dataclass
@@ -29,27 +40,20 @@ class RenderedCalendar:
 
 
 class CalendarCache:
-    def __init__(self, refresh_seconds: int) -> None:
+    def __init__(self, plugin: CalendarPlugin, refresh_seconds: int) -> None:
+        self.plugin = plugin
         self.refresh_seconds = refresh_seconds
         self._lock = RLock()
         self._rendered: RenderedCalendar | None = None
 
-    def get(self) -> RenderedCalendar:
+    def get(self, *, force: bool = False) -> RenderedCalendar:
         bucket = int(time.time() // self.refresh_seconds)
         with self._lock:
-            if self._rendered and self._rendered.bucket == bucket:
+            if not force and self._rendered and self._rendered.bucket == bucket:
                 return self._rendered
 
             generated_at = configured_now()
-            week_start = start_of_week(generated_at.date())
-            events, all_day_events, source = load_events(week_start)
-            image = render_image(
-                week_start=week_start,
-                days=days_for_week(week_start),
-                events=events,
-                all_day_events=all_day_events,
-                now=generated_at,
-            )
+            image, source = self.plugin.render(generated_at)
             body = encode_image(image)
             digest = hashlib.sha256(body).hexdigest()[:16]
             self._rendered = RenderedCalendar(bucket, body, digest, source, generated_at)
@@ -70,7 +74,33 @@ def encode_image(image) -> bytes:
     return buffer.getvalue()
 
 
-def make_handler(cache: CalendarCache):
+def render_weekly(generated_at: datetime) -> tuple[Image.Image, str]:
+    week_start = start_of_week(generated_at.date())
+    events, all_day_events, source = load_events(week_start)
+    image = render_image(
+        week_start=week_start,
+        days=days_for_week(week_start),
+        events=events,
+        all_day_events=all_day_events,
+        now=generated_at,
+    )
+    return image, source
+
+
+def render_month(generated_at: datetime) -> tuple[Image.Image, str]:
+    month_start = generated_at.date().replace(day=1)
+    events, source = load_month_events(month_start)
+    return render_month_image(month_start=month_start, events=events, now=generated_at), source
+
+
+def plugin_specs() -> dict[str, CalendarPlugin]:
+    return {
+        "weekly": CalendarPlugin("weekly", "weekly-calendar", render_weekly),
+        "month": CalendarPlugin("month", "month-calendar", render_month),
+    }
+
+
+def make_handler(caches: dict[str, CalendarCache]):
     class TRMNLCalendarHandler(BaseHTTPRequestHandler):
         server_version = "TRMNLWeeklyCalendar/0.1"
 
@@ -81,23 +111,39 @@ def make_handler(cache: CalendarCache):
             self.handle_request(send_body=False)
 
         def handle_request(self, *, send_body: bool) -> None:
-            path = urlparse(self.path).path
+            parsed = urlparse(self.path)
+            path = parsed.path
+            force_refresh = refresh_requested(parsed.query)
             try:
                 if path in {"/", "/healthz"}:
                     self.send_text("ok\n", send_body=send_body)
-                elif path == "/trmnl.json":
-                    self.send_redirect_json(cache.get(), send_body=send_body)
-                elif path in {"/image.png", "/calendar.png"}:
-                    self.send_png(cache.get().body, send_body=send_body)
-                else:
+                    return
+
+                route = resolve_route(path)
+                if route is None:
                     self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+
+                cache = caches[route.plugin_name]
+                rendered = cache.get(force=force_refresh)
+                if route.kind == "json":
+                    self.send_redirect_json(rendered, cache, route.image_path, send_body=send_body)
+                else:
+                    self.send_png(rendered.body, cache, send_body=send_body, no_store=force_refresh)
             except Exception as exc:
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
 
-        def send_redirect_json(self, rendered: RenderedCalendar, *, send_body: bool) -> None:
-            image_url = f"{self.base_url()}/image.png?v={rendered.fingerprint}"
+        def send_redirect_json(
+            self,
+            rendered: RenderedCalendar,
+            cache: CalendarCache,
+            image_path: str,
+            *,
+            send_body: bool,
+        ) -> None:
+            image_url = f"{self.base_url()}{image_path}?v={rendered.fingerprint}"
             payload = {
-                "filename": f"weekly-calendar-{rendered.fingerprint}",
+                "filename": f"{cache.plugin.filename_prefix}-{rendered.fingerprint}",
                 "url": image_url,
                 "refresh_rate": cache.refresh_seconds,
             }
@@ -110,11 +156,14 @@ def make_handler(cache: CalendarCache):
             if send_body:
                 self.wfile.write(body)
 
-        def send_png(self, body: bytes, *, send_body: bool) -> None:
+        def send_png(self, body: bytes, cache: CalendarCache, *, send_body: bool, no_store: bool = False) -> None:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", f"public, max-age={cache.refresh_seconds}")
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
+            else:
+                self.send_header("Cache-Control", f"public, max-age={cache.refresh_seconds}")
             self.end_headers()
             if send_body:
                 self.wfile.write(body)
@@ -144,15 +193,53 @@ def make_handler(cache: CalendarCache):
     return TRMNLCalendarHandler
 
 
+@dataclass(frozen=True)
+class Route:
+    kind: str
+    plugin_name: str
+    image_path: str
+
+
+def resolve_route(path: str) -> Route | None:
+    if path == "/trmnl.json":
+        return Route("json", "weekly", "/image.png")
+    if path in {"/image.png", "/calendar.png"}:
+        return Route("image", "weekly", path)
+
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 2 or parts[0] not in {"weekly", "month"}:
+        return None
+
+    plugin_name, leaf = parts
+    image_path = f"/{plugin_name}/image.png"
+    if leaf == "trmnl.json":
+        return Route("json", plugin_name, image_path)
+    if leaf in {"image.png", "calendar.png"}:
+        return Route("image", plugin_name, image_path)
+    return None
+
+
+def refresh_requested(query: str) -> bool:
+    params = parse_qs(query, keep_blank_values=True)
+    for key in ("refresh", "force", "regen"):
+        if key not in params:
+            continue
+        values = [value.lower() for value in params[key]]
+        return not any(value in {"0", "false", "no"} for value in values)
+    return False
+
+
 def main() -> None:
     host = os.environ.get("TRMNL_HOST", "0.0.0.0")
     port = int(os.environ.get("TRMNL_PORT", "8787"))
     refresh_seconds = int(os.environ.get("TRMNL_REFRESH_SECONDS", str(DEFAULT_REFRESH_SECONDS)))
-    cache = CalendarCache(refresh_seconds)
-    server = ThreadingHTTPServer((host, port), make_handler(cache))
-    print(f"Serving TRMNL weekly calendar on http://{host}:{port}")
-    print(f"Redirect JSON: http://{host}:{port}/trmnl.json")
-    print(f"Alias image:   http://{host}:{port}/image.png")
+    plugins = plugin_specs()
+    caches = {name: CalendarCache(plugin, refresh_seconds) for name, plugin in plugins.items()}
+    server = ThreadingHTTPServer((host, port), make_handler(caches))
+    print(f"Serving TRMNL calendar plugins on http://{host}:{port}")
+    print(f"Weekly Redirect JSON: http://{host}:{port}/weekly/trmnl.json")
+    print(f"Month Redirect JSON:  http://{host}:{port}/month/trmnl.json")
+    print(f"Legacy weekly JSON:   http://{host}:{port}/trmnl.json")
     server.serve_forever()
 
 
