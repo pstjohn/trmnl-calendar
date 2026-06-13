@@ -17,6 +17,7 @@ from PIL import Image
 
 from trmnl_weekly_calendar.calendar_data import load_events, load_month_events
 from trmnl_weekly_calendar.month_render import MONTH_WEEK_ROWS, render_month_image
+from trmnl_weekly_calendar.png_encode import encode_png_grayscale_4bit
 from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
 
 
@@ -62,12 +63,15 @@ class CalendarCache:
 
 def encode_image(image) -> bytes:
     mode = os.environ.get("TRMNL_IMAGE_MODE", "4bit").lower()
+    if mode in {"4bit", "4-bit", "gray4", "grayscale4"}:
+        return encode_png_grayscale_4bit(image)
+
     if mode in {"1bit", "bw", "black-white"}:
         image = image.convert("1")
     elif mode in {"gray", "greyscale", "grayscale"}:
         pass
     else:
-        image = image.point(lambda p: round(p / 17) * 17)
+        return encode_png_grayscale_4bit(image)
 
     buffer = BytesIO()
     image.save(buffer, format="PNG", optimize=True)

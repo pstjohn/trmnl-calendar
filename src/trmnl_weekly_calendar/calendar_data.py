@@ -23,6 +23,12 @@ from trmnl_weekly_calendar.render import (
 
 
 TONE_STEPS = [238, 232, 240, 235, 242, 228, 244, 229, 226, 241, 234]
+CALENDAR_TONES = {
+    "peter st. john": 232,
+    "primary": 232,
+    "corbin": 238,
+    "family": 226,
+}
 DEFAULT_CALENDAR_DATA_TTL_SECONDS = 2 * 60 * 60
 
 
@@ -30,7 +36,14 @@ DEFAULT_CALENDAR_DATA_TTL_SECONDS = 2 * 60 * 60
 class CalendarDataKey:
     command_template: str
     account: str
+    calendar_sources: tuple[str, ...]
     timezone: str
+
+
+@dataclass(frozen=True)
+class CalendarSource:
+    label: str
+    calendar_id: str
 
 
 @dataclass
@@ -74,8 +87,7 @@ class CalendarDataCache:
                 if cached is not None:
                     return filter_raw_events(cached.raw_events, range_start, range_end, tz)
 
-            payload = run_gog(command_template, range_start, range_end)
-            raw_events = extract_event_list(payload)
+            raw_events = load_gog_events(command_template, range_start, range_end)
             self._entries.append(
                 RawEventCacheEntry(
                     key=key,
@@ -167,20 +179,72 @@ def calendar_data_ttl_seconds() -> int:
 
 
 def calendar_data_key(command_template: str, tz: ZoneInfo) -> CalendarDataKey:
+    account = os.environ.get("GOG_ACCOUNT", "").strip()
     return CalendarDataKey(
         command_template=command_template,
-        account=os.environ.get("GOG_ACCOUNT", "").strip(),
+        account=account,
+        calendar_sources=tuple(calendar_source_key(source) for source in configured_calendar_sources(account)),
         timezone=getattr(tz, "key", str(tz)),
     )
 
 
-def run_gog(command_template: str, range_start: date, range_end: date) -> Any:
+def load_gog_events(command_template: str, range_start: date, range_end: date) -> list[dict[str, Any]]:
+    account = os.environ.get("GOG_ACCOUNT", "").strip()
+    sources = configured_calendar_sources(account)
+    if not sources:
+        return extract_event_list(run_gog(command_template, range_start, range_end, None))
+    if "{calendar}" not in command_template:
+        raise RuntimeError("TRMNL_GOG_CALENDARS requires TRMNL_GOG_COMMAND to include {calendar}")
+
+    raw_events: list[dict[str, Any]] = []
+    for source in sources:
+        payload = run_gog(command_template, range_start, range_end, source.calendar_id)
+        for event in extract_event_list(payload):
+            tagged = dict(event)
+            tagged["_trmnl_calendar_label"] = source.label
+            tagged["_trmnl_calendar_id"] = source.calendar_id
+            raw_events.append(tagged)
+    return raw_events
+
+
+def configured_calendar_sources(account: str) -> list[CalendarSource]:
+    value = os.environ.get("TRMNL_GOG_CALENDARS", "").strip()
+    if not value:
+        return []
+
+    sources: list[CalendarSource] = []
+    for part in value.split(","):
+        spec = part.strip()
+        if not spec:
+            continue
+        if "=" in spec:
+            label, calendar_id = spec.split("=", 1)
+        else:
+            label = spec
+            calendar_id = spec
+        label = label.strip()
+        calendar_id = calendar_id.strip()
+        if calendar_id == "{account}":
+            calendar_id = account
+        if label and calendar_id:
+            sources.append(CalendarSource(label, calendar_id))
+    return sources
+
+
+def calendar_source_key(source: CalendarSource) -> str:
+    return f"{source.label}={source.calendar_id}"
+
+
+def run_gog(command_template: str, range_start: date, range_end: date, calendar_id: str | None) -> Any:
     account = os.environ.get("GOG_ACCOUNT", "").strip()
     if "{account}" in command_template and not account:
         raise RuntimeError("TRMNL_GOG_COMMAND uses {account}, but GOG_ACCOUNT is not set")
+    if "{calendar}" in command_template and not calendar_id:
+        raise RuntimeError("TRMNL_GOG_COMMAND uses {calendar}, but no calendar was configured")
 
     values = {
         "account": account,
+        "calendar": calendar_id or "",
         "start": range_start.isoformat(),
         "end": range_end.isoformat(),
         "start_datetime": datetime.combine(range_start, time.min).isoformat(),
@@ -265,7 +329,7 @@ def parse_events(
 
         start, start_is_all_day = parse_temporal(start_value, tz)
         end, end_is_all_day = parse_temporal(end_value, tz) if end_value is not None else (start, start_is_all_day)
-        tone = TONE_STEPS[index % len(TONE_STEPS)]
+        tone = tone_for_raw_event(raw, index)
 
         if start_is_all_day or end_is_all_day:
             start_day = start if isinstance(start, date) and not isinstance(start, datetime) else start.date()
@@ -323,7 +387,7 @@ def parse_month_events(
 
         start, start_is_all_day = parse_temporal(start_value, tz)
         end, end_is_all_day = parse_temporal(end_value, tz) if end_value is not None else (start, start_is_all_day)
-        tone = TONE_STEPS[index % len(TONE_STEPS)]
+        tone = tone_for_raw_event(raw, index)
 
         if start_is_all_day or end_is_all_day:
             start_day = start if isinstance(start, date) and not isinstance(start, datetime) else start.date()
@@ -404,6 +468,20 @@ def first_value(raw: dict[str, Any], *keys: str) -> Any:
         if key in raw:
             return raw[key]
     return None
+
+
+def tone_for_raw_event(raw: dict[str, Any], index: int) -> int:
+    label = clean_text(first_value(raw, "_trmnl_calendar_label", "calendarSummary", "calendarName", "calendar"))
+    calendar_id = clean_text(first_value(raw, "_trmnl_calendar_id", "calendarId"))
+    for value in (label, calendar_id):
+        tone = CALENDAR_TONES.get(normalize_calendar_name(value))
+        if tone is not None:
+            return tone
+    return TONE_STEPS[index % len(TONE_STEPS)]
+
+
+def normalize_calendar_name(value: str) -> str:
+    return value.strip().lower()
 
 
 def has_event_time(raw: dict[str, Any]) -> bool:

@@ -7,7 +7,7 @@ The current design uses:
 - Roboto Serif for day headings and the left time rail
 - Roboto Flex for body text, events, all-day events, and temperatures
 - Climacons for weather icons
-- 16-level grayscale output for TRMNL X
+- True 4-bit grayscale PNG output for TRMNL X
 
 ## Render
 
@@ -24,13 +24,13 @@ Or with an already prepared Python environment:
 python3 src/trmnl_weekly_calendar/render.py
 ```
 
-The main output is written to:
+The main TRMNL output is a grayscale PNG with bit depth `4`, color type `0`, and 16 gray levels:
 
 ```text
 outputs/trmnl_weekly_calendar_mockup_4bit_grayscale.png
 ```
 
-The script also writes a continuous grayscale preview and a 1-bit dithered comparison image.
+The script also writes a continuous 8-bit grayscale preview and a 1-bit dithered comparison image.
 
 ## TRMNL Plugin Server
 
@@ -94,6 +94,8 @@ TRMNL_CALENDAR_DATA_TTL_SECONDS=7200
 TRMNL_TIMEZONE=America/Denver
 TRMNL_IMAGE_MODE=4bit
 ```
+
+`TRMNL_IMAGE_MODE=4bit` writes a packed PNG with bit depth `4` and grayscale color type `0`.
 
 For TRMNL Redirect, configure the plugin Web Address to:
 

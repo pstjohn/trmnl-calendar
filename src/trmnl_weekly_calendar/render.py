@@ -7,7 +7,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, features
+
+try:
+    from trmnl_weekly_calendar.png_encode import encode_png_grayscale_4bit, quantize_grayscale_4bit
+except ModuleNotFoundError:
+    from png_encode import encode_png_grayscale_4bit, quantize_grayscale_4bit
 
 
 W, H = 1872, 1404
@@ -23,28 +28,94 @@ DAY_START_HOUR = 6.0
 DAY_END_HOUR = 20.0
 
 
-def font(path: str | Path, size: int, variation: str | None = None) -> ImageFont.FreeTypeFont:
-    loaded = ImageFont.truetype(str(path), size)
+CSS_PX_TO_POINTS = 72 / 96
+FONT_LAYOUT_ENGINE = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
+VARIATION_WEIGHTS = {
+    "Thin": 100,
+    "ExtraLight": 200,
+    "Light": 300,
+    "Regular": 400,
+    "Medium": 500,
+    "SemiBold": 600,
+    "Bold": 700,
+    "ExtraBold": 800,
+    "Black": 900,
+    "ExtraBlack": 1000,
+}
+
+
+def axis_name(axis: dict[str, object]) -> str:
+    name = axis.get("name", "")
+    if isinstance(name, bytes):
+        return name.decode("utf-8", "replace")
+    return str(name)
+
+
+def clamp_axis_value(value: float, axis: dict[str, object]) -> float:
+    minimum = float(axis["minimum"])
+    maximum = float(axis["maximum"])
+    return min(maximum, max(minimum, value))
+
+
+def variation_weight(variation: str | None) -> int | None:
+    if not variation:
+        return None
+    return VARIATION_WEIGHTS.get(variation.removesuffix(" Italic"))
+
+
+def apply_browser_optical_size(loaded: ImageFont.FreeTypeFont, size: int, variation: str | None) -> None:
+    try:
+        axes = loaded.get_variation_axes()
+    except OSError:
+        return
+
+    weight = variation_weight(variation)
+    values: list[float] = []
+    for axis in axes:
+        value = float(axis["default"])
+        name = axis_name(axis)
+        if name == "Optical Size":
+            value = clamp_axis_value(float(size) * CSS_PX_TO_POINTS, axis)
+        elif name == "Weight" and weight is not None:
+            value = clamp_axis_value(float(weight), axis)
+        values.append(value)
+
+    try:
+        loaded.set_variation_by_axes(values)
+    except OSError:
+        return
+
+
+def font(
+    path: str | Path,
+    size: int,
+    variation: str | None = None,
+    *,
+    browser_optical_size: bool = False,
+) -> ImageFont.FreeTypeFont:
+    loaded = ImageFont.truetype(str(path), size, layout_engine=FONT_LAYOUT_ENGINE)
     if variation:
         try:
             loaded.set_variation_by_name(variation)
         except OSError:
             pass
+    if browser_optical_size:
+        apply_browser_optical_size(loaded, size, variation)
     return loaded
 
 
 F = {
     "title": font(ROBOTO_SERIF, 58, "Bold"),
-    "meta": font(ROBOTO_FLEX, 25, "Regular"),
+    "meta": font(ROBOTO_FLEX, 25, "Regular", browser_optical_size=True),
     "day": font(ROBOTO_SERIF, 36, "Bold"),
     "date": font(ROBOTO_SERIF, 31, "Regular"),
-    "weather": font(ROBOTO_FLEX, 23, "Regular"),
+    "weather": font(ROBOTO_FLEX, 23, "Regular", browser_optical_size=True),
     "time": font(ROBOTO_SERIF, 24, "Bold"),
-    "event": font(ROBOTO_FLEX, 23, "Regular"),
-    "event_small": font(ROBOTO_FLEX, 20, "Regular"),
+    "event": font(ROBOTO_FLEX, 23, "Regular", browser_optical_size=True),
+    "event_small": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
     "current": font(ROBOTO_SERIF, 31, "Bold"),
-    "now": font(ROBOTO_FLEX, 20, "Regular"),
-    "tiny": font(ROBOTO_FLEX, 18, "Regular"),
+    "now": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
+    "tiny": font(ROBOTO_FLEX, 18, "Regular", browser_optical_size=True),
 }
 
 
@@ -420,8 +491,8 @@ def write_outputs(img: Image.Image) -> tuple[Path, Path, Path]:
     gray4_path = OUT / "trmnl_weekly_calendar_mockup_4bit_grayscale.png"
     bw_path = OUT / "trmnl_weekly_calendar_mockup_dithered.png"
     img.save(gray_path)
-    gray4 = img.point(lambda p: round(p / 17) * 17)
-    gray4.save(gray4_path)
+    gray4 = quantize_grayscale_4bit(img)
+    gray4_path.write_bytes(encode_png_grayscale_4bit(gray4))
     bw = img.convert("1", dither=Image.Dither.FLOYDSTEINBERG)
     bw.save(bw_path)
     return gray_path, gray4_path, bw_path
