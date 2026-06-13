@@ -42,6 +42,7 @@ Create `/etc/systemd/system/trmnl-calendar.service` with:
 - `TRMNL_GOG_COMMAND=/usr/local/bin/gog calendar events primary --account {account} --from {start} --to {end} --all-pages --json --no-input`, with `{account}` supplied from `GOG_ACCOUNT`
 - `ExecStart=/home/ubuntu/.local/bin/uv run serve-trmnl-calendar`
 - `Restart=always` and `RestartSec=5`
+- `SuccessExitStatus=143` so intentional SIGTERM stops during restart are treated as graceful
 
 Enable and start the service, then verify health and image endpoints locally.
 
@@ -120,3 +121,4 @@ Enable and start the service, then verify health and image endpoints locally.
 - 2026-06-13: Chunk 2 DONE. Added `{account}` command-template support, documented the local Hermes command, ran `uv run python -m compileall src`, and verified `load_events()` returns live `gog` data with the new template.
 - 2026-06-13: Chunk 3 DONE. Installed `/etc/systemd/system/trmnl-calendar.service`, ran `systemctl daemon-reload`, enabled and started the service, and confirmed it is active and listening on `0.0.0.0:8787`.
 - 2026-06-13: Chunk 4 DONE. Verified `/healthz`, `/trmnl.json`, and `/image.png`; the image endpoint returned a `1872 x 1404` grayscale PNG and the service journal showed successful 200 responses.
+- 2026-06-13: Final review DONE. Fixed a stale README `gog` example, added `SuccessExitStatus=143` to the installed unit after restart review, reran compile/live-load checks, restarted the service, and rechecked local endpoints.

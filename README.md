@@ -63,7 +63,8 @@ GET /healthz     Health check
 By default, the server renders the mock events. Set `TRMNL_GOG_COMMAND` to fetch live Google Calendar JSON with `gog`. The command is a template; `{start}` is the week start date and `{end}` is the exclusive week end date.
 
 ```bash
-export TRMNL_GOG_COMMAND='gog calendar events --json --start {start} --end {end}'
+export GOG_ACCOUNT='you@example.com'
+export TRMNL_GOG_COMMAND='gog calendar events primary --account {account} --from {start} --to {end} --json --no-input'
 export TRMNL_PUBLIC_BASE_URL='https://your-public-host.example.com'
 serve-trmnl-calendar
 ```
