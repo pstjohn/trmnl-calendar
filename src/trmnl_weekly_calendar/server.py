@@ -13,7 +13,7 @@ from threading import RLock
 from urllib.parse import urlparse
 
 from trmnl_weekly_calendar.calendar_data import load_events
-from trmnl_weekly_calendar.render import days_for_week, render_image, start_of_week
+from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
 
 
 DEFAULT_REFRESH_SECONDS = 15 * 60
@@ -40,7 +40,7 @@ class CalendarCache:
             if self._rendered and self._rendered.bucket == bucket:
                 return self._rendered
 
-            generated_at = datetime.now()
+            generated_at = configured_now()
             week_start = start_of_week(generated_at.date())
             events, all_day_events, source = load_events(week_start)
             image = render_image(

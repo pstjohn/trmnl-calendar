@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -42,6 +44,18 @@ F = {
     "now": font(ROBOTO_FLEX, 20, "Regular"),
     "tiny": font(ROBOTO_FLEX, 18, "Regular"),
 }
+
+
+def configured_zone() -> ZoneInfo:
+    return ZoneInfo(os.environ.get("TRMNL_TIMEZONE", "America/Denver"))
+
+
+def configured_now() -> datetime:
+    return datetime.now(configured_zone())
+
+
+def configured_today() -> date:
+    return configured_now().date()
 
 
 @dataclass
@@ -208,7 +222,7 @@ def time_y(hour: float, top: int, bottom: int) -> float:
 
 def start_of_week(today: date | None = None, first_weekday: int = 6) -> date:
     """Return the week start for today. Defaults to Sunday-first calendars."""
-    today = today or date.today()
+    today = today or configured_today()
     days_since_start = (today.weekday() - first_weekday) % 7
     return today - timedelta(days=days_since_start)
 
@@ -238,7 +252,7 @@ def allocate_all_day_rows(events: list[AllDayEvent]) -> list[AllDayEvent]:
 
 
 def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, float]:
-    now = now or datetime.now()
+    now = now or configured_now()
     week_end = week_start + timedelta(days=6)
     if week_start <= now.date() <= week_end:
         day = (now.date() - week_start).days
@@ -246,7 +260,7 @@ def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, 
         rounded = round(minutes / 15) * 15
         hour = rounded / 60
     else:
-        day = min(6, max(0, (date.today() - week_start).days))
+        day = min(6, max(0, (configured_today() - week_start).days))
         hour = 6.0
     return day, min(22, max(6, hour))
 
@@ -287,7 +301,7 @@ def render_image(
     # Day headings with weather tucked beneath each printed date.
     day_top = top
     draw.line((grid_left, day_top, grid_right, day_top), fill=0, width=2)
-    current_day = (now or datetime.now()).date()
+    current_day = (now or configured_now()).date()
     highlighted_day = (current_day - week_start).days if week_start <= current_day <= week_start + timedelta(days=6) else -1
     for i, (dow, date_label, _kind, _temp) in enumerate(days):
         dow, date_label, kind, temp = days[i]
