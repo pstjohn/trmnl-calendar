@@ -68,7 +68,15 @@ export TRMNL_PUBLIC_BASE_URL='https://your-public-host.example.com'
 serve-trmnl-calendar
 ```
 
-Adjust the `gog` arguments to match the CLI you use. The parser accepts common Google Calendar shapes such as top-level arrays, `items`, `events`, or `data`, with `summary`, `location`, `start.dateTime`, `start.date`, `end.dateTime`, and `end.date`.
+Adjust the `gog` arguments to match the CLI you use. The command template supports `{start}`, `{end}`, `{start_datetime}`, `{end_datetime}`, and `{account}` from `GOG_ACCOUNT`.
+
+For the local Hermes setup, use:
+
+```bash
+export TRMNL_GOG_COMMAND='gog calendar events primary --account {account} --from {start} --to {end} --all-pages --json --no-input'
+```
+
+The parser accepts common Google Calendar shapes such as top-level arrays, `items`, `events`, or `data`, with `summary`, `location`, `start.dateTime`, `start.date`, `end.dateTime`, and `end.date`.
 
 Useful environment variables:
 

@@ -27,7 +27,12 @@ def load_events(week_start: date) -> tuple[list[Event], list[AllDayEvent], str]:
 
 def run_gog(command_template: str, week_start: date) -> Any:
     end = week_start + timedelta(days=7)
+    account = os.environ.get("GOG_ACCOUNT", "").strip()
+    if "{account}" in command_template and not account:
+        raise RuntimeError("TRMNL_GOG_COMMAND uses {account}, but GOG_ACCOUNT is not set")
+
     values = {
+        "account": account,
         "start": week_start.isoformat(),
         "end": end.isoformat(),
         "start_datetime": datetime.combine(week_start, time.min).isoformat(),
