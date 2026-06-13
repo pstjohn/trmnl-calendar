@@ -86,12 +86,12 @@ def encode_image(image) -> bytes:
 
 
 def render_weekly(generated_at: datetime, force: bool = False) -> tuple[Image.Image, str]:
-    week_start = start_of_week(generated_at.date())
-    events, all_day_events, source = load_events(week_start, force=force)
-    weather_days, weather_source = load_weekly_weather(week_start, force=force, today=generated_at.date())
+    view_start = generated_at.date()
+    events, all_day_events, source = load_events(view_start, force=force)
+    weather_days, weather_source = load_weekly_weather(view_start, force=force, today=generated_at.date())
     image = render_image(
-        week_start=week_start,
-        days=weather_days or days_for_week(week_start),
+        week_start=view_start,
+        days=weather_days or days_for_week(view_start),
         events=events,
         all_day_events=all_day_events,
         now=generated_at,

@@ -52,7 +52,7 @@ python3 -m pip install -e .
 serve-trmnl-calendar
 ```
 
-The server exposes:
+The weekly plugin renders a rolling 7-day window starting with today as the left-most column. The server exposes:
 
 ```text
 GET /weekly/trmnl.json  Weekly Redirect plugin JSON
@@ -110,7 +110,7 @@ export TRMNL_WEATHER_LON='-105.231'
 ```
 
 Weather data is cached for `TRMNL_WEATHER_TTL_SECONDS`, defaulting to `21600` seconds. Set `TRMNL_WEATHER_ENABLED=0` to force mock weather. The month plugin renders compact weather only for the next 7 days.
-For the weekly plugin, dates before today are filled from Open-Meteo historical daily weather when `TRMNL_WEATHER_LAT` and `TRMNL_WEATHER_LON` are set. Set `TRMNL_WEEKLY_HISTORICAL_WEATHER=0` to disable that historical fill.
+If a weekly render ever includes dates before today, those past dates are filled from Open-Meteo historical daily weather when `TRMNL_WEATHER_LAT` and `TRMNL_WEATHER_LON` are set. Set `TRMNL_WEEKLY_HISTORICAL_WEATHER=0` to disable that historical fill.
 
 External API calls are logged to the normal service log by default. Each outbound weather HTTP request and each live `gog` calendar command writes one `external_api_call` line with provider, sanitized host/path or command, status, duration, and date range. Query strings, account names, and raw calendar ids are not logged.
 
