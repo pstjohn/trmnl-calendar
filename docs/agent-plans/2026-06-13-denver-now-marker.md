@@ -81,3 +81,4 @@ Add renderer helpers for configured timezone, current datetime, and current date
 - 2026-06-13: Inspected server and renderer; found naive `datetime.now()`/`date.today()` paths despite `TRMNL_TIMEZONE=America/Denver` being configured in the service.
 - 2026-06-13: Chunk 1 DONE. Added renderer timezone helpers, switched renderer fallback paths and server `generated_at` to `configured_now()`, ran `uv run python -m compileall src`, and confirmed `TRMNL_TIMEZONE=America/Denver` yields marker hour `6`.
 - 2026-06-13: Chunk 2 DONE. Restarted `trmnl-calendar.service`, verified local/public JSON and PNG endpoints, and visually confirmed the rendered marker is on Saturday at the 6a line.
+- 2026-06-13: Final review DONE. Reran compile, `America/Denver` marker calculation, service status, and local endpoint checks; no findings.
