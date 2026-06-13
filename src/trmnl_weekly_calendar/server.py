@@ -5,7 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from PIL import Image
 
 from trmnl_weekly_calendar.calendar_data import load_events, load_month_events
-from trmnl_weekly_calendar.month_render import render_month_image
+from trmnl_weekly_calendar.month_render import MONTH_WEEK_ROWS, render_month_image
 from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
 
 
@@ -27,7 +27,7 @@ DEFAULT_REFRESH_SECONDS = 15 * 60
 class CalendarPlugin:
     name: str
     filename_prefix: str
-    render: Callable[[datetime], tuple[Image.Image, str]]
+    render: Callable[[datetime, bool], tuple[Image.Image, str]]
 
 
 @dataclass
@@ -53,7 +53,7 @@ class CalendarCache:
                 return self._rendered
 
             generated_at = configured_now()
-            image, source = self.plugin.render(generated_at)
+            image, source = self.plugin.render(generated_at, force)
             body = encode_image(image)
             digest = hashlib.sha256(body).hexdigest()[:16]
             self._rendered = RenderedCalendar(bucket, body, digest, source, generated_at)
@@ -74,9 +74,9 @@ def encode_image(image) -> bytes:
     return buffer.getvalue()
 
 
-def render_weekly(generated_at: datetime) -> tuple[Image.Image, str]:
+def render_weekly(generated_at: datetime, force: bool = False) -> tuple[Image.Image, str]:
     week_start = start_of_week(generated_at.date())
-    events, all_day_events, source = load_events(week_start)
+    events, all_day_events, source = load_events(week_start, force=force)
     image = render_image(
         week_start=week_start,
         days=days_for_week(week_start),
@@ -87,9 +87,11 @@ def render_weekly(generated_at: datetime) -> tuple[Image.Image, str]:
     return image, source
 
 
-def render_month(generated_at: datetime) -> tuple[Image.Image, str]:
+def render_month(generated_at: datetime, force: bool = False) -> tuple[Image.Image, str]:
     month_start = generated_at.date().replace(day=1)
-    events, source = load_month_events(month_start)
+    visible_start = start_of_week(month_start)
+    visible_end = visible_start + timedelta(weeks=MONTH_WEEK_ROWS)
+    events, source = load_month_events(month_start, range_end=visible_end, force=force)
     return render_month_image(month_start=month_start, events=events, now=generated_at), source
 
 

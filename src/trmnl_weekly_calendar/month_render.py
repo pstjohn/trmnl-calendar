@@ -10,7 +10,6 @@ from trmnl_weekly_calendar.render import (
     F,
     H,
     W,
-    configured_today,
     draw_centered,
     draw_hatching,
     ellipsize,
@@ -19,6 +18,9 @@ from trmnl_weekly_calendar.render import (
     start_of_week,
     text_wh,
 )
+
+
+MONTH_WEEK_ROWS = 5
 
 
 def render_month_image(
@@ -43,9 +45,9 @@ def render_month_image(
     grid_top = top + title_h + dow_h
     grid_bottom = H - 64
     col_w = (grid_right - grid_left) / 7
-    row_h = (grid_bottom - grid_top) / 6
+    row_h = (grid_bottom - grid_top) / MONTH_WEEK_ROWS
     col_edges = [round(grid_left + i * col_w) for i in range(8)]
-    row_edges = [round(grid_top + i * row_h) for i in range(7)]
+    row_edges = [round(grid_top + i * row_h) for i in range(MONTH_WEEK_ROWS + 1)]
     cell_pad = 12
 
     for y in range(0, H, 7):
@@ -67,14 +69,14 @@ def render_month_image(
     for event in events:
         events_by_day[event.day].append(event)
 
-    for row in range(6):
+    for row in range(MONTH_WEEK_ROWS):
         for col in range(7):
             cell_day = first_day + timedelta(days=row * 7 + col)
             x0 = col_edges[col]
             x1 = col_edges[col + 1]
             y0 = row_edges[row]
             y1 = row_edges[row + 1]
-            in_month = cell_day.month == month_start.month
+            in_month = cell_day.year == month_start.year and cell_day.month == month_start.month
             is_today = cell_day == today
 
             if not in_month:
@@ -99,13 +101,17 @@ def draw_day_number(
     in_month: bool,
 ) -> None:
     label = str(cell_day.day)
+    date_font = F["current"]
     fill = 0 if in_month else 136
+    text_x = x0 + 18
+    text_y = y0 + 8
     if is_today:
-        label_w, label_h = text_wh(draw, label, F["date"])
-        rounded_rect(draw, (x0 + 12, y0 + 10, x0 + 30 + label_w, y0 + 18 + label_h), 3, fill=0)
-        draw.text((x0 + 21, y0 + 10), label, font=F["date"], fill=255)
+        text_x = x0 + 20
+        bbox = draw.textbbox((text_x, text_y), label, font=date_font)
+        rounded_rect(draw, (bbox[0] - 9, bbox[1] - 6, bbox[2] + 10, bbox[3] + 9), 3, fill=0)
+        draw.text((text_x, text_y), label, font=date_font, fill=255)
         return
-    draw.text((x0 + 18, y0 + 10), label, font=F["date"], fill=fill)
+    draw.text((text_x, text_y), label, font=date_font, fill=fill)
 
 
 def draw_month_events(

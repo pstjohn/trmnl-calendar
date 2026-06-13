@@ -21,7 +21,7 @@ This package renders and serves a TRMNL weekly calendar image.
 
 ## Systemd Service Operations
 
-The persistent server is `trmnl-calendar.service` at `/etc/systemd/system/trmnl-calendar.service`. It runs as `ubuntu` from `/home/ubuntu/trmnl-calendar`, loads `/home/ubuntu/.hermes/.env`, and starts `/home/ubuntu/.local/bin/uv run serve-trmnl-calendar`. It listens on `0.0.0.0:8787`, uses `America/Denver`, refreshes every `900` seconds, outputs `4bit`, and loads live events with `/usr/local/bin/gog`.
+The persistent server is `trmnl-calendar.service` at `/etc/systemd/system/trmnl-calendar.service`. It runs as `ubuntu` from `/home/ubuntu/trmnl-calendar`, loads `/home/ubuntu/.hermes/.env`, and starts `/home/ubuntu/.local/bin/uv run serve-trmnl-calendar`. It listens on `0.0.0.0:8787`, uses `America/Denver`, refreshes rendered images every `900` seconds, caches live calendar data for `7200` seconds by default, outputs `4bit`, and loads live events with `/usr/local/bin/gog`.
 
 - `systemctl status trmnl-calendar.service --no-pager` checks runtime state.
 - `journalctl -u trmnl-calendar.service -n 100 --no-pager` reviews recent logs.
@@ -58,7 +58,7 @@ The `/trmnl.json` response must stay small and fast. TRMNL documents a strict 2-
 - `refresh_rate` is seconds between device wakeups. The fastest documented cadence is once per minute.
 - `/image.png` must return `Content-Type: image/png` and an integer `Content-Length`.
 - This project targets TRMNL X full-screen output: `1872x1404`, 4:3, 16-level grayscale PNG. The older Redirect article calls out OG-style `800x480` 1-bit PNG/BMP3; do not downscale unless explicitly targeting OG hardware.
-- Use normal `/weekly/trmnl.json` or `/month/trmnl.json` for the device. Use `?refresh=1&ts=<unique>` only for local/manual iteration, because it bypasses the app cache and may trigger live calendar loading.
+- Use normal `/weekly/trmnl.json` or `/month/trmnl.json` for the device. Use `?refresh=1&ts=<unique>` only for local/manual iteration, because it bypasses both the rendered-image cache and the shared calendar-data cache.
 - BrevLab may rewrite public cache headers. When manually forcing a public image refresh, change the query string, for example `/image.png?refresh=1&ts=20260613T121930Z`.
 
 ## Coding Style & Naming Conventions

@@ -4,8 +4,10 @@ import json
 import os
 import shlex
 import subprocess
+import time as time_module
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,6 +23,23 @@ from trmnl_weekly_calendar.render import (
 
 
 TONE_STEPS = [238, 232, 240, 235, 242, 228, 244, 229, 226, 241, 234]
+DEFAULT_CALENDAR_DATA_TTL_SECONDS = 2 * 60 * 60
+
+
+@dataclass(frozen=True)
+class CalendarDataKey:
+    command_template: str
+    account: str
+    timezone: str
+
+
+@dataclass
+class RawEventCacheEntry:
+    key: CalendarDataKey
+    range_start: date
+    range_end: date
+    expires_at: float
+    raw_events: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -32,26 +51,127 @@ class MonthEvent:
     sort_minutes: int = 0
 
 
-def load_events(week_start: date) -> tuple[list[Event], list[AllDayEvent], str]:
+class CalendarDataCache:
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._entries: list[RawEventCacheEntry] = []
+
+    def load_raw_events(
+        self,
+        command_template: str,
+        range_start: date,
+        range_end: date,
+        tz: ZoneInfo,
+        *,
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        key = calendar_data_key(command_template, tz)
+        now = time_module.time()
+        with self._lock:
+            self._prune(now)
+            if not force:
+                cached = self._find_superset(key, range_start, range_end)
+                if cached is not None:
+                    return filter_raw_events(cached.raw_events, range_start, range_end, tz)
+
+            payload = run_gog(command_template, range_start, range_end)
+            raw_events = extract_event_list(payload)
+            self._entries.append(
+                RawEventCacheEntry(
+                    key=key,
+                    range_start=range_start,
+                    range_end=range_end,
+                    expires_at=now + calendar_data_ttl_seconds(),
+                    raw_events=raw_events,
+                )
+            )
+            return filter_raw_events(raw_events, range_start, range_end, tz)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def _prune(self, now: float) -> None:
+        self._entries = [entry for entry in self._entries if entry.expires_at > now]
+
+    def _find_superset(
+        self,
+        key: CalendarDataKey,
+        range_start: date,
+        range_end: date,
+    ) -> RawEventCacheEntry | None:
+        eligible: list[RawEventCacheEntry] = []
+        for entry in self._entries:
+            if entry.key != key:
+                continue
+            if entry.range_start <= range_start and range_end <= entry.range_end:
+                eligible.append(entry)
+        if not eligible:
+            return None
+        return max(eligible, key=lambda item: item.expires_at)
+
+
+_CALENDAR_DATA_CACHE = CalendarDataCache()
+
+
+def load_events(week_start: date, *, force: bool = False) -> tuple[list[Event], list[AllDayEvent], str]:
     command_template = os.environ.get("TRMNL_GOG_COMMAND", "").strip()
     if not command_template:
         return MOCK_EVENTS, MOCK_ALL_DAY_EVENTS, "mock"
 
-    payload = run_gog(command_template, week_start, week_start + timedelta(days=7))
-    raw_events = extract_event_list(payload)
-    events, all_day_events = parse_events(raw_events, week_start, local_zone())
+    tz = local_zone()
+    raw_events = _CALENDAR_DATA_CACHE.load_raw_events(
+        command_template,
+        week_start,
+        week_start + timedelta(days=7),
+        tz,
+        force=force,
+    )
+    events, all_day_events = parse_events(raw_events, week_start, tz)
     return events, all_day_events, "gog"
 
 
-def load_month_events(month_start: date) -> tuple[list[MonthEvent], str]:
-    month_end = next_month(month_start)
+def load_month_events(
+    month_start: date,
+    *,
+    range_end: date | None = None,
+    force: bool = False,
+) -> tuple[list[MonthEvent], str]:
+    month_end = range_end or next_month(month_start)
     command_template = os.environ.get("TRMNL_GOG_COMMAND", "").strip()
     if not command_template:
-        return mock_month_events(month_start), "mock"
+        return mock_month_events(month_start, range_end=month_end), "mock"
 
-    payload = run_gog(command_template, month_start, month_end)
-    raw_events = extract_event_list(payload)
-    return parse_month_events(raw_events, month_start, month_end, local_zone()), "gog"
+    tz = local_zone()
+    raw_events = _CALENDAR_DATA_CACHE.load_raw_events(
+        command_template,
+        month_start,
+        month_end,
+        tz,
+        force=force,
+    )
+    return parse_month_events(raw_events, month_start, month_end, tz), "gog"
+
+
+def clear_calendar_data_cache() -> None:
+    _CALENDAR_DATA_CACHE.clear()
+
+
+def calendar_data_ttl_seconds() -> int:
+    return int(
+        os.environ.get(
+            "TRMNL_CALENDAR_DATA_TTL_SECONDS",
+            str(DEFAULT_CALENDAR_DATA_TTL_SECONDS),
+        )
+    )
+
+
+def calendar_data_key(command_template: str, tz: ZoneInfo) -> CalendarDataKey:
+    return CalendarDataKey(
+        command_template=command_template,
+        account=os.environ.get("GOG_ACCOUNT", "").strip(),
+        timezone=getattr(tz, "key", str(tz)),
+    )
 
 
 def run_gog(command_template: str, range_start: date, range_end: date) -> Any:
@@ -90,7 +210,47 @@ def extract_event_list(payload: Any) -> list[dict[str, Any]]:
     return flattened
 
 
-def parse_events(raw_events: list[dict[str, Any]], week_start: date, tz: ZoneInfo) -> tuple[list[Event], list[AllDayEvent]]:
+def filter_raw_events(
+    raw_events: list[dict[str, Any]],
+    range_start: date,
+    range_end: date,
+    tz: ZoneInfo,
+) -> list[dict[str, Any]]:
+    return [event for event in raw_events if raw_event_overlaps_range(event, range_start, range_end, tz)]
+
+
+def raw_event_overlaps_range(raw: dict[str, Any], range_start: date, range_end: date, tz: ZoneInfo) -> bool:
+    start_value = first_value(raw, "start", "startTime", "start_time", "starts_at", "begin")
+    end_value = first_value(raw, "end", "endTime", "end_time", "ends_at", "finish")
+    if start_value is None:
+        return False
+
+    try:
+        start, start_is_all_day = parse_temporal(start_value, tz)
+        end, end_is_all_day = parse_temporal(end_value, tz) if end_value is not None else (start, start_is_all_day)
+    except ValueError:
+        return True
+
+    if start_is_all_day or end_is_all_day:
+        start_day = start if isinstance(start, date) and not isinstance(start, datetime) else start.date()
+        end_day = end if isinstance(end, date) and not isinstance(end, datetime) else end.date()
+        exclusive_end = end_day if end_day > start_day else start_day + timedelta(days=1)
+        return start_day < range_end and exclusive_end > range_start
+
+    start_dt = ensure_datetime(start, tz)
+    end_dt = ensure_datetime(end, tz)
+    if end_dt <= start_dt:
+        end_dt = start_dt + timedelta(minutes=30)
+    range_start_dt = datetime.combine(range_start, time.min, tz)
+    range_end_dt = datetime.combine(range_end, time.min, tz)
+    return start_dt < range_end_dt and end_dt > range_start_dt
+
+
+def parse_events(
+    raw_events: list[dict[str, Any]],
+    week_start: date,
+    tz: ZoneInfo,
+) -> tuple[list[Event], list[AllDayEvent]]:
     timed: list[Event] = []
     all_day: list[AllDayEvent] = []
     week_end = week_start + timedelta(days=7)
@@ -146,7 +306,12 @@ def parse_events(raw_events: list[dict[str, Any]], week_start: date, tz: ZoneInf
     return timed, all_day
 
 
-def parse_month_events(raw_events: list[dict[str, Any]], month_start: date, month_end: date, tz: ZoneInfo) -> list[MonthEvent]:
+def parse_month_events(
+    raw_events: list[dict[str, Any]],
+    month_start: date,
+    month_end: date,
+    tz: ZoneInfo,
+) -> list[MonthEvent]:
     events: list[MonthEvent] = []
 
     for index, raw in enumerate(raw_events):
@@ -179,13 +344,21 @@ def parse_month_events(raw_events: list[dict[str, Any]], month_start: date, mont
             segment_end = min(end_dt, day_end)
             if segment_start >= segment_end:
                 continue
-            events.append(MonthEvent(day, title, format_month_time(segment_start), tone, segment_start.hour * 60 + segment_start.minute))
+            events.append(
+                MonthEvent(
+                    day,
+                    title,
+                    format_month_time(segment_start),
+                    tone,
+                    segment_start.hour * 60 + segment_start.minute,
+                )
+            )
 
     return sorted(events, key=month_event_sort_key)
 
 
-def mock_month_events(month_start: date) -> list[MonthEvent]:
-    month_end = next_month(month_start)
+def mock_month_events(month_start: date, *, range_end: date | None = None) -> list[MonthEvent]:
+    month_end = range_end or next_month(month_start)
     events: list[MonthEvent] = []
     for event in MOCK_ALL_DAY_EVENTS:
         start_day = MOCK_WEEK_START + timedelta(days=event.start_day)
@@ -196,7 +369,15 @@ def mock_month_events(month_start: date) -> list[MonthEvent]:
     for event in MOCK_EVENTS:
         day = MOCK_WEEK_START + timedelta(days=event.day)
         if month_start <= day < month_end:
-            events.append(MonthEvent(day, event.title, short_time_label(event.start), event.tone, int(event.start * 60)))
+            events.append(
+                MonthEvent(
+                    day,
+                    event.title,
+                    short_time_label(event.start),
+                    event.tone,
+                    int(event.start * 60),
+                )
+            )
 
     return sorted(events, key=month_event_sort_key)
 
