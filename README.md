@@ -64,6 +64,8 @@ GET /image.png          Legacy weekly PNG image
 GET /healthz            Health check
 ```
 
+The server keeps a rendered-image cache in memory and persists the last-good PNG plus metadata under `outputs/server-cache` by default. When a render bucket expires, `/trmnl.json` and `/image.png` return the previous image immediately while a background refresh generates the next image and fingerprint. On startup, the server loads the persisted render before accepting requests, then prewarms stale weekly and monthly renders in the background. A background prewarm loop also refreshes each render bucket shortly after it starts, so TRMNL usually hits an already-rendered image instead of triggering work itself. Set `TRMNL_RENDER_CACHE_DIR` to move the cache, `TRMNL_PERSIST_RENDER_CACHE=0` to disable the disk cache, or `TRMNL_RENDER_PREWARM_DELAY_SECONDS` to tune the post-bucket prewarm delay.
+
 By default, the server renders the mock events. Set `TRMNL_GOG_COMMAND` to fetch live Google Calendar JSON with `gog`. The command is a template; `{start}` is the week start date and `{end}` is the exclusive week end date.
 
 ```bash
@@ -130,6 +132,9 @@ TRMNL_REFRESH_SECONDS=900
 TRMNL_CALENDAR_DATA_TTL_SECONDS=7200
 TRMNL_TIMEZONE=America/Denver
 TRMNL_IMAGE_MODE=4bit
+TRMNL_RENDER_CACHE_DIR=outputs/server-cache
+TRMNL_PERSIST_RENDER_CACHE=1
+TRMNL_RENDER_PREWARM_DELAY_SECONDS=5
 TRMNL_GOG_CALENDARS=Peter St. John=primary,Corbin=Corbin,Family=Family
 TRMNL_WEATHER_PROVIDER=nws
 TRMNL_WEATHER_LAT=39.772

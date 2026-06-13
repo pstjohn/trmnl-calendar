@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
+import time
 import unittest
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
+
+from PIL import Image
 
 from trmnl_weekly_calendar import server
 
@@ -29,6 +36,74 @@ class ServerRenderTests(unittest.TestCase):
         self.assertEqual(captured["week_start"].isoformat(), "2026-06-13")
         self.assertEqual(captured["days"][0][:2], ("SAT", "13"))
         self.assertEqual(captured["days"][-1][:2], ("FRI", "19"))
+
+    def test_calendar_cache_returns_stale_while_refreshing(self) -> None:
+        render_started = Event()
+        release_render = Event()
+        render_count = 0
+
+        def render(_generated_at, _force):
+            nonlocal render_count
+            render_count += 1
+            if render_count == 2:
+                render_started.set()
+                release_render.wait(2)
+            return Image.new("L", (2, 2), color=render_count * 80), f"render-{render_count}"
+
+        with TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"TRMNL_PERSIST_RENDER_CACHE": "0"}):
+                cache = server.CalendarCache(
+                    server.CalendarPlugin("test", "test", render),
+                    refresh_seconds=1,
+                    cache_dir=Path(temp_dir),
+                )
+                with patch.object(server.time, "time", return_value=1000):
+                    first = cache.get()
+                with patch.object(server.time, "time", return_value=1002):
+                    second = cache.get()
+
+                self.assertTrue(render_started.wait(2))
+                self.assertEqual(second.fingerprint, first.fingerprint)
+                release_render.set()
+                for _ in range(20):
+                    if cache._rendered and cache._rendered.fingerprint != first.fingerprint:
+                        break
+                    time.sleep(0.05)
+                with patch.object(server.time, "time", return_value=1002):
+                    third = cache.get()
+
+        self.assertNotEqual(third.fingerprint, first.fingerprint)
+
+    def test_calendar_cache_loads_persisted_render(self) -> None:
+        def render(_generated_at, _force):
+            return Image.new("L", (2, 2), color=7), "persisted-source"
+
+        with TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"TRMNL_PERSIST_RENDER_CACHE": "1"}):
+                plugin = server.CalendarPlugin("persisted", "persisted", render)
+                with patch.object(server.time, "time", return_value=2000):
+                    first_cache = server.CalendarCache(plugin, refresh_seconds=10, cache_dir=Path(temp_dir))
+                    rendered = first_cache.get()
+
+                def fail_render(_generated_at, _force):
+                    raise AssertionError("render should not be called")
+
+                loaded_cache = server.CalendarCache(
+                    server.CalendarPlugin("persisted", "persisted", fail_render),
+                    refresh_seconds=10,
+                    cache_dir=Path(temp_dir),
+                )
+                with patch.object(server.time, "time", return_value=2000):
+                    loaded = loaded_cache.get()
+
+        self.assertEqual(loaded.fingerprint, rendered.fingerprint)
+        self.assertEqual(loaded.body, rendered.body)
+
+    def test_seconds_until_next_prewarm_waits_until_after_next_bucket(self) -> None:
+        self.assertEqual(server.seconds_until_next_prewarm(1000.0, 900, 5.0), 805.0)
+        self.assertEqual(server.seconds_until_next_prewarm(1799.0, 900, 5.0), 6.0)
+        self.assertEqual(server.seconds_until_next_prewarm(1804.5, 900, 5.0), 1.0)
+        self.assertEqual(server.seconds_until_next_prewarm(1805.5, 900, 5.0), 899.5)
 
 
 if __name__ == "__main__":

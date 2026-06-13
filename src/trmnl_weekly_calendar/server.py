@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
-from threading import RLock
+from pathlib import Path
+from threading import RLock, Thread
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -19,7 +20,7 @@ from PIL import Image
 from trmnl_weekly_calendar.calendar_data import load_events, load_month_events
 from trmnl_weekly_calendar.month_render import MONTH_WEEK_ROWS, render_month_image
 from trmnl_weekly_calendar.png_encode import encode_png_grayscale_4bit
-from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
+from trmnl_weekly_calendar.render import OUT, configured_now, days_for_week, render_image, start_of_week
 from trmnl_weekly_calendar.weather_data import (
     format_daily_temperature,
     load_weather_forecasts,
@@ -29,6 +30,9 @@ from trmnl_weekly_calendar.weather_data import (
 
 DEFAULT_REFRESH_SECONDS = 15 * 60
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_RENDER_CACHE_DIR = OUT / "server-cache"
+DEFAULT_RENDER_PREWARM_DELAY_SECONDS = 5.0
+LOGGER = logging.getLogger("trmnl_weekly_calendar.server")
 
 
 @dataclass
@@ -48,24 +52,109 @@ class RenderedCalendar:
 
 
 class CalendarCache:
-    def __init__(self, plugin: CalendarPlugin, refresh_seconds: int) -> None:
+    def __init__(self, plugin: CalendarPlugin, refresh_seconds: int, cache_dir: Path | None = None) -> None:
         self.plugin = plugin
         self.refresh_seconds = refresh_seconds
+        self.cache_dir = cache_dir or render_cache_dir()
+        self._persist_render_cache = persistent_render_cache_enabled()
         self._lock = RLock()
-        self._rendered: RenderedCalendar | None = None
+        self._rendered: RenderedCalendar | None = self._load_persisted()
+        self._refreshing = False
 
     def get(self, *, force: bool = False) -> RenderedCalendar:
         bucket = int(time.time() // self.refresh_seconds)
         with self._lock:
             if not force and self._rendered and self._rendered.bucket == bucket:
                 return self._rendered
+            if not force and self._rendered:
+                self._start_refresh_locked(bucket, force=False)
+                return self._rendered
 
-            generated_at = configured_now()
-            image, source = self.plugin.render(generated_at, force)
-            body = encode_image(image)
-            digest = hashlib.sha256(body).hexdigest()[:16]
-            self._rendered = RenderedCalendar(bucket, body, digest, source, generated_at)
-            return self._rendered
+        return self._render(bucket, force=force)
+
+    def prewarm(self) -> None:
+        bucket = int(time.time() // self.refresh_seconds)
+        with self._lock:
+            if self._rendered and self._rendered.bucket == bucket:
+                return
+            self._start_refresh_locked(bucket, force=False)
+
+    def ensure_initial(self) -> None:
+        with self._lock:
+            if self._rendered is not None:
+                return
+        self._render(int(time.time() // self.refresh_seconds), force=False)
+
+    def _start_refresh_locked(self, bucket: int, *, force: bool) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        thread = Thread(target=self._refresh_background, args=(bucket, force), daemon=True)
+        thread.start()
+
+    def _refresh_background(self, bucket: int, force: bool) -> None:
+        try:
+            self._render(bucket, force=force)
+        except Exception:
+            LOGGER.exception("Background render failed for %s", self.plugin.name)
+            with self._lock:
+                self._refreshing = False
+
+    def _render(self, bucket: int, *, force: bool) -> RenderedCalendar:
+        generated_at = configured_now()
+        image, source = self.plugin.render(generated_at, force)
+        body = encode_image(image)
+        digest = hashlib.sha256(body).hexdigest()[:16]
+        rendered = RenderedCalendar(bucket, body, digest, source, generated_at)
+        with self._lock:
+            self._rendered = rendered
+            self._refreshing = False
+        self._persist(rendered)
+        return rendered
+
+    def _load_persisted(self) -> RenderedCalendar | None:
+        if not self._persist_render_cache:
+            return None
+        meta_path, body_path = self._cache_paths()
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            body = body_path.read_bytes()
+            fingerprint = str(metadata.get("fingerprint") or hashlib.sha256(body).hexdigest()[:16])
+            return RenderedCalendar(
+                bucket=int(metadata.get("bucket", -1)),
+                body=body,
+                fingerprint=fingerprint,
+                source=str(metadata.get("source", "persisted")),
+                generated_at=datetime.fromisoformat(str(metadata["generated_at"])),
+            )
+        except FileNotFoundError:
+            return None
+        except Exception:
+            LOGGER.exception("Failed to load persisted render cache for %s", self.plugin.name)
+            return None
+
+    def _persist(self, rendered: RenderedCalendar) -> None:
+        if not self._persist_render_cache:
+            return
+        meta_path, body_path = self._cache_paths()
+        metadata = {
+            "bucket": rendered.bucket,
+            "fingerprint": rendered.fingerprint,
+            "source": rendered.source,
+            "generated_at": rendered.generated_at.isoformat(),
+        }
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            body_path.write_bytes(rendered.body)
+            meta_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        except Exception:
+            LOGGER.exception("Failed to persist render cache for %s", self.plugin.name)
+
+    def _cache_paths(self) -> tuple[Path, Path]:
+        return (
+            self.cache_dir / f"{self.plugin.name}.json",
+            self.cache_dir / f"{self.plugin.name}.png",
+        )
 
 
 def encode_image(image) -> bytes:
@@ -263,6 +352,53 @@ def configure_logging() -> None:
     )
 
 
+def render_cache_dir() -> Path:
+    configured = os.environ.get("TRMNL_RENDER_CACHE_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    return DEFAULT_RENDER_CACHE_DIR
+
+
+def persistent_render_cache_enabled() -> bool:
+    value = os.environ.get("TRMNL_PERSIST_RENDER_CACHE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def render_prewarm_delay_seconds() -> float:
+    value = os.environ.get("TRMNL_RENDER_PREWARM_DELAY_SECONDS", str(DEFAULT_RENDER_PREWARM_DELAY_SECONDS)).strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return DEFAULT_RENDER_PREWARM_DELAY_SECONDS
+
+
+def seconds_until_next_prewarm(now: float, refresh_seconds: int, delay_seconds: float) -> float:
+    bucket = int(now // refresh_seconds) * refresh_seconds
+    prewarm_at = bucket + delay_seconds
+    if prewarm_at <= now:
+        prewarm_at = bucket + refresh_seconds + delay_seconds
+    return max(1.0, prewarm_at - now)
+
+
+def start_prewarm_loop(caches: dict[str, CalendarCache], refresh_seconds: int) -> Thread:
+    delay_seconds = render_prewarm_delay_seconds()
+
+    def loop() -> None:
+        while True:
+            time.sleep(seconds_until_next_prewarm(time.time(), refresh_seconds, delay_seconds))
+            for cache in caches.values():
+                cache.prewarm()
+
+    thread = Thread(target=loop, name="render-prewarm", daemon=True)
+    thread.start()
+    LOGGER.info(
+        "Render cache prewarm loop started refresh_seconds=%s delay_seconds=%.1f",
+        refresh_seconds,
+        delay_seconds,
+    )
+    return thread
+
+
 def main() -> None:
     configure_logging()
     host = os.environ.get("TRMNL_HOST", "0.0.0.0")
@@ -270,7 +406,12 @@ def main() -> None:
     refresh_seconds = int(os.environ.get("TRMNL_REFRESH_SECONDS", str(DEFAULT_REFRESH_SECONDS)))
     plugins = plugin_specs()
     caches = {name: CalendarCache(plugin, refresh_seconds) for name, plugin in plugins.items()}
+    for cache in caches.values():
+        cache.ensure_initial()
     server = ThreadingHTTPServer((host, port), make_handler(caches))
+    for cache in caches.values():
+        cache.prewarm()
+    start_prewarm_loop(caches, refresh_seconds)
     print(f"Serving TRMNL calendar plugins on http://{host}:{port}")
     print(f"Weekly Redirect JSON: http://{host}:{port}/weekly/trmnl.json")
     print(f"Month Redirect JSON:  http://{host}:{port}/month/trmnl.json")
