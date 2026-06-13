@@ -119,3 +119,4 @@ Enable and start the service, then verify health and image endpoints locally.
 - 2026-06-13: Chunk 1 DONE. Ran `uv sync`, created the local virtualenv, and confirmed a non-interactive `gog calendar events` call returns JSON with Hermes env loaded.
 - 2026-06-13: Chunk 2 DONE. Added `{account}` command-template support, documented the local Hermes command, ran `uv run python -m compileall src`, and verified `load_events()` returns live `gog` data with the new template.
 - 2026-06-13: Chunk 3 DONE. Installed `/etc/systemd/system/trmnl-calendar.service`, ran `systemctl daemon-reload`, enabled and started the service, and confirmed it is active and listening on `0.0.0.0:8787`.
+- 2026-06-13: Chunk 4 DONE. Verified `/healthz`, `/trmnl.json`, and `/image.png`; the image endpoint returned a `1872 x 1404` grayscale PNG and the service journal showed successful 200 responses.
