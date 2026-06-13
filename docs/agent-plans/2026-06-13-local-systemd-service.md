@@ -116,3 +116,4 @@ Enable and start the service, then verify health and image endpoints locally.
 ## Progress Log
 
 - 2026-06-13: Inspected repo, verified `gog` access through `/home/ubuntu/.hermes/.env`, confirmed `uv` and systemd availability, and selected a system-level service running as `ubuntu`.
+- 2026-06-13: Chunk 1 DONE. Ran `uv sync`, created the local virtualenv, and confirmed a non-interactive `gog calendar events` call returns JSON with Hermes env loaded.
