@@ -11,6 +11,12 @@ from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from trmnl_weekly_calendar.external_api_log import (
+    duration_ms,
+    log_subprocess_call,
+    perf_counter,
+    stable_fingerprint,
+)
 from trmnl_weekly_calendar.render import (
     DAY_END_HOUR,
     DAY_START_HOUR,
@@ -251,7 +257,57 @@ def run_gog(command_template: str, range_start: date, range_end: date, calendar_
         "end_datetime": datetime.combine(range_end, time.min).isoformat(),
     }
     command = shlex.split(command_template.format(**values))
-    result = subprocess.run(command, capture_output=True, check=True, text=True, timeout=30)
+    started_at = perf_counter()
+    log_fields = {
+        "range_start": range_start.isoformat(),
+        "range_end": range_end.isoformat(),
+        "calendar": stable_fingerprint(calendar_id),
+    }
+    try:
+        result = subprocess.run(command, capture_output=True, check=True, text=True, timeout=30)
+    except subprocess.CalledProcessError as exc:
+        log_subprocess_call(
+            provider="gog",
+            command=command,
+            operation="calendar-events",
+            status=exc.returncode,
+            duration_ms=duration_ms(started_at),
+            error=exc.__class__.__name__,
+            **log_fields,
+        )
+        raise
+    except subprocess.TimeoutExpired as exc:
+        log_subprocess_call(
+            provider="gog",
+            command=command,
+            operation="calendar-events",
+            status="timeout",
+            duration_ms=duration_ms(started_at),
+            error=exc.__class__.__name__,
+            **log_fields,
+        )
+        raise
+    except Exception as exc:
+        log_subprocess_call(
+            provider="gog",
+            command=command,
+            operation="calendar-events",
+            status="error",
+            duration_ms=duration_ms(started_at),
+            error=exc.__class__.__name__,
+            **log_fields,
+        )
+        raise
+
+    log_subprocess_call(
+        provider="gog",
+        command=command,
+        operation="calendar-events",
+        status=result.returncode,
+        duration_ms=duration_ms(started_at),
+        stdout_bytes=len(result.stdout),
+        **log_fields,
+    )
     return json.loads(result.stdout)
 
 

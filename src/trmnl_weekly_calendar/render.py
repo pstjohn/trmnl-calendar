@@ -25,6 +25,7 @@ ROBOTO_SERIF = FONT_DIR / "RobotoSerif.ttf"
 ROBOTO_FLEX = FONT_DIR / "RobotoFlex.ttf"
 CLIMACONS = FONT_DIR / "climacons-webfont.ttf"
 LIBERATION_SANS = Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+LIBERATION_SANS_BOLD = Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf")
 DAY_START_HOUR = 6.0
 DAY_END_HOUR = 20.0
 CURRENT_DAY_FILL = 238
@@ -129,6 +130,8 @@ def first_existing_font(candidates: tuple[Path, ...], fallback: Path) -> Path:
 
 MONTH_EVENT_FONT = first_existing_font((LIBERATION_SANS,), ROBOTO_FLEX)
 MONTH_EVENT_OPTICAL_SIZE = 14 if MONTH_EVENT_FONT == ROBOTO_FLEX else None
+MONTH_TIME_FONT = first_existing_font((LIBERATION_SANS_BOLD,), ROBOTO_FLEX)
+MONTH_TIME_OPTICAL_SIZE = 14 if MONTH_TIME_FONT == ROBOTO_FLEX else None
 
 
 F = {
@@ -144,6 +147,7 @@ F = {
     "now": font(ROBOTO_FLEX, 22, "Regular", browser_optical_size=True),
     "tiny": font(ROBOTO_FLEX, 20, "Regular", browser_optical_size=True),
     "month_event": font(MONTH_EVENT_FONT, 20, "Regular", optical_size=MONTH_EVENT_OPTICAL_SIZE),
+    "month_time": font(MONTH_TIME_FONT, 20, "Bold", optical_size=MONTH_TIME_OPTICAL_SIZE),
     "month_tiny": font(MONTH_EVENT_FONT, 18, "Regular", optical_size=MONTH_EVENT_OPTICAL_SIZE),
 }
 
@@ -279,7 +283,14 @@ def draw_hatching(img: Image.Image, xy: tuple[int, int, int, int], step: int = 1
     img.paste(patch, (x0, y0), mask)
 
 
-def draw_weather_icon(draw: ImageDraw.ImageDraw, kind: str, cx: int, cy: int, scale: float = 1.0) -> None:
+def draw_weather_icon(
+    draw: ImageDraw.ImageDraw,
+    kind: str,
+    cx: int,
+    cy: int,
+    scale: float = 1.0,
+    fill: int = 0,
+) -> None:
     glyphs = {
         "clear": "\ue028",  # climacon.sun
         "cloud": "\ue000",  # climacon.cloud
@@ -287,15 +298,17 @@ def draw_weather_icon(draw: ImageDraw.ImageDraw, kind: str, cx: int, cy: int, sc
         "partly": "\ue001",  # climacon.cloud.sun
         "wind": "\ue021",  # climacon.wind
         "storm": "\ue025",  # climacon.lightning.cloud
+        "snow": "\ue018",  # climacon.snow.cloud
+        "fog": "\ue01b",  # climacon.fog.cloud
     }
     glyph = glyphs.get(kind, "\ue000")
     if not CLIMACONS.exists():
-        draw_centered(draw, (cx - 42, cy - 34, cx + 42, cy + 34), "?", F["day"], fill=0)
+        draw_centered(draw, (cx - 42, cy - 34, cx + 42, cy + 34), "?", F["day"], fill=fill)
         return
-    icon_font = ImageFont.truetype(str(CLIMACONS), max(42, int(76 * scale)))
+    icon_font = ImageFont.truetype(str(CLIMACONS), max(18, int(76 * scale)))
     bbox = draw.textbbox((0, 0), glyph, font=icon_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), glyph, font=icon_font, fill=0)
+    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), glyph, font=icon_font, fill=fill)
 
 
 def wrap(draw: ImageDraw.ImageDraw, text: str, fnt: ImageFont.ImageFont, max_w: int) -> list[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -19,9 +20,15 @@ from trmnl_weekly_calendar.calendar_data import load_events, load_month_events
 from trmnl_weekly_calendar.month_render import MONTH_WEEK_ROWS, render_month_image
 from trmnl_weekly_calendar.png_encode import encode_png_grayscale_4bit
 from trmnl_weekly_calendar.render import configured_now, days_for_week, render_image, start_of_week
+from trmnl_weekly_calendar.weather_data import (
+    format_daily_temperature,
+    load_weather_forecasts,
+    load_weekly_weather,
+)
 
 
 DEFAULT_REFRESH_SECONDS = 15 * 60
+DEFAULT_LOG_LEVEL = "INFO"
 
 
 @dataclass
@@ -81,14 +88,15 @@ def encode_image(image) -> bytes:
 def render_weekly(generated_at: datetime, force: bool = False) -> tuple[Image.Image, str]:
     week_start = start_of_week(generated_at.date())
     events, all_day_events, source = load_events(week_start, force=force)
+    weather_days, weather_source = load_weekly_weather(week_start, force=force, today=generated_at.date())
     image = render_image(
         week_start=week_start,
-        days=days_for_week(week_start),
+        days=weather_days or days_for_week(week_start),
         events=events,
         all_day_events=all_day_events,
         now=generated_at,
     )
-    return image, source
+    return image, f"{source}+{weather_source}"
 
 
 def render_month(generated_at: datetime, force: bool = False) -> tuple[Image.Image, str]:
@@ -96,7 +104,18 @@ def render_month(generated_at: datetime, force: bool = False) -> tuple[Image.Ima
     visible_start = start_of_week(month_start)
     visible_end = visible_start + timedelta(weeks=MONTH_WEEK_ROWS)
     events, source = load_month_events(month_start, range_end=visible_end, force=force)
-    return render_month_image(month_start=month_start, events=events, now=generated_at), source
+    weather_start = generated_at.date()
+    weather_end = weather_start + timedelta(days=7)
+    forecasts, weather_source = load_weather_forecasts(weather_start, weather_end, force=force)
+    weather = {}
+    if forecasts is not None:
+        weather = {
+            day: (forecast.icon_kind(), format_daily_temperature(forecast))
+            for day, forecast in forecasts.items()
+            if forecast.has_temperature()
+        }
+    image = render_month_image(month_start=month_start, events=events, weather=weather, now=generated_at)
+    return image, f"{source}+{weather_source}"
 
 
 def plugin_specs() -> dict[str, CalendarPlugin]:
@@ -235,7 +254,17 @@ def refresh_requested(query: str) -> bool:
     return False
 
 
+def configure_logging() -> None:
+    level_name = os.environ.get("TRMNL_LOG_LEVEL", DEFAULT_LOG_LEVEL).strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+
 def main() -> None:
+    configure_logging()
     host = os.environ.get("TRMNL_HOST", "0.0.0.0")
     port = int(os.environ.get("TRMNL_PORT", "8787"))
     refresh_seconds = int(os.environ.get("TRMNL_REFRESH_SECONDS", str(DEFAULT_REFRESH_SECONDS)))

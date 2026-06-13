@@ -86,6 +86,40 @@ export TRMNL_GOG_COMMAND='gog calendar events {calendar} --account {account} --f
 
 The parser accepts common Google Calendar shapes such as top-level arrays, `items`, `events`, or `data`, with `summary`, `location`, `start.dateTime`, `start.date`, `end.dateTime`, and `end.date`.
 
+Weekly weather is mock data unless a live provider is configured. The server supports NWS/NOAA and Open-Meteo without extra dependencies:
+
+```bash
+export TRMNL_WEATHER_PROVIDER='nws'
+export TRMNL_WEATHER_LAT='39.772'
+export TRMNL_WEATHER_LON='-105.231'
+export TRMNL_WEATHER_USER_AGENT='trmnl-calendar (you@example.com)'
+```
+
+For NWS, you can skip the point lookup and use a known grid forecast URL:
+
+```bash
+export TRMNL_WEATHER_FORECAST_URL='https://api.weather.gov/gridpoints/BOU/55,64/forecast'
+```
+
+Or use Open-Meteo daily forecasts:
+
+```bash
+export TRMNL_WEATHER_PROVIDER='open-meteo'
+export TRMNL_WEATHER_LAT='39.772'
+export TRMNL_WEATHER_LON='-105.231'
+```
+
+Weather data is cached for `TRMNL_WEATHER_TTL_SECONDS`, defaulting to `21600` seconds. Set `TRMNL_WEATHER_ENABLED=0` to force mock weather. The month plugin renders compact weather only for the next 7 days.
+For the weekly plugin, dates before today are filled from Open-Meteo historical daily weather when `TRMNL_WEATHER_LAT` and `TRMNL_WEATHER_LON` are set. Set `TRMNL_WEEKLY_HISTORICAL_WEATHER=0` to disable that historical fill.
+
+External API calls are logged to the normal service log by default. Each outbound weather HTTP request and each live `gog` calendar command writes one `external_api_call` line with provider, sanitized host/path or command, status, duration, and date range. Query strings, account names, and raw calendar ids are not logged.
+
+```bash
+journalctl -u trmnl-calendar.service -g external_api_call --since "6 hours ago" --no-pager
+```
+
+Set `TRMNL_EXTERNAL_API_LOGGING=0` to disable outbound call logging, or set `TRMNL_LOG_LEVEL=WARNING` to suppress info-level logs.
+
 Useful environment variables:
 
 ```text
@@ -97,6 +131,13 @@ TRMNL_CALENDAR_DATA_TTL_SECONDS=7200
 TRMNL_TIMEZONE=America/Denver
 TRMNL_IMAGE_MODE=4bit
 TRMNL_GOG_CALENDARS=Peter St. John=primary,Corbin=Corbin,Family=Family
+TRMNL_WEATHER_PROVIDER=nws
+TRMNL_WEATHER_LAT=39.772
+TRMNL_WEATHER_LON=-105.231
+TRMNL_WEATHER_TTL_SECONDS=21600
+TRMNL_WEEKLY_HISTORICAL_WEATHER=1
+TRMNL_EXTERNAL_API_LOGGING=1
+TRMNL_LOG_LEVEL=INFO
 ```
 
 `TRMNL_IMAGE_MODE=4bit` writes a packed PNG with bit depth `4` and grayscale color type `0`.
