@@ -80,3 +80,4 @@ Use the existing `ellipsize` helper before drawing `ev.where`, using the same `m
 
 - 2026-06-13: Inspected renderer and confirmed raw `ev.where` drawing is the horizontal overflow source.
 - 2026-06-13: Chunk 1 DONE. Replaced raw location drawing with `ellipsize(...)`, ran `uv run python -m compileall src`, and rendered a synthetic long-address sample that measured within the event text width.
+- 2026-06-13: Chunk 2 DONE. Restarted `trmnl-calendar.service`, confirmed it is active, and verified local/public `/trmnl.json` plus cache-busted `/image.png` responses.
