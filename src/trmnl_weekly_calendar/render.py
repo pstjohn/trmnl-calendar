@@ -29,7 +29,12 @@ LIBERATION_SANS_BOLD = Path("/usr/share/fonts/truetype/liberation/LiberationSans
 DAY_START_HOUR = 6.0
 DAY_END_HOUR = 20.0
 CURRENT_DAY_FILL = 238
+CURRENT_DAY_WIDTH_WEIGHT = 1.16
 MAX_EVENT_FILL_GRAY = 226
+EVENT_ACCENT_WIDTH = 8
+EVENT_TEXT_GAP_Y = 8
+EVENT_TEXT_OFFSET_X = 14
+MIN_EVENT_ACCENT_HEIGHT = 18
 
 
 CSS_PX_TO_POINTS = 72 / 96
@@ -192,6 +197,25 @@ class AllDayEvent:
     tone: int = 238
 
 
+@dataclass(frozen=True)
+class TimedEventLayout:
+    event: Event
+    visible_start: float
+    visible_end: float
+    lane: int
+    lane_count: int
+
+
+@dataclass(frozen=True)
+class TimedEventBox:
+    layout: TimedEventLayout
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    text_y1: float
+
+
 MOCK_DAYS = [
     ("SUN", "7", "clear", "72 / 51"),
     ("MON", "8", "cloud", "68 / 49"),
@@ -268,6 +292,10 @@ def rounded_rect(
 
 def event_fill(tone: int) -> int:
     return min(MAX_EVENT_FILL_GRAY, max(0, tone))
+
+
+def event_accent(tone: int) -> int:
+    return min(80, max(0, tone - 170))
 
 
 def draw_hatching(img: Image.Image, xy: tuple[int, int, int, int], step: int = 11, fill: int = 206) -> None:
@@ -348,6 +376,21 @@ def time_y(hour: float, top: int, bottom: int) -> float:
     return top + (hour - DAY_START_HOUR) / (DAY_END_HOUR - DAY_START_HOUR) * (bottom - top)
 
 
+def day_column_edges(left: int, right: int, highlighted_day: int) -> list[int]:
+    weights = [1.0] * 7
+    if 0 <= highlighted_day <= 6:
+        weights[highlighted_day] = CURRENT_DAY_WIDTH_WEIGHT
+
+    total_weight = sum(weights)
+    x = float(left)
+    edges = [left]
+    for weight in weights[:-1]:
+        x += (right - left) * weight / total_weight
+        edges.append(round(x))
+    edges.append(right)
+    return edges
+
+
 def start_of_week(today: date | None = None, first_weekday: int = 6) -> date:
     """Return the week start for today. Defaults to Sunday-first calendars."""
     today = today or configured_today()
@@ -379,6 +422,120 @@ def allocate_all_day_rows(events: list[AllDayEvent]) -> list[AllDayEvent]:
     return allocated
 
 
+def allocate_timed_event_lanes(events: list[Event]) -> list[TimedEventLayout]:
+    visible_by_day: list[list[tuple[Event, float, float]]] = [[] for _ in range(7)]
+    for event in events:
+        if not 0 <= event.day <= 6:
+            continue
+        visible_start = max(DAY_START_HOUR, event.start)
+        visible_end = min(DAY_END_HOUR, event.end)
+        if visible_end <= DAY_START_HOUR or visible_start >= DAY_END_HOUR or visible_end <= visible_start:
+            continue
+        visible_by_day[event.day].append((event, visible_start, visible_end))
+
+    layouts: list[TimedEventLayout] = []
+    for day_events in visible_by_day:
+        current_group: list[tuple[Event, float, float]] = []
+        current_group_end = DAY_START_HOUR
+        for item in sorted(day_events, key=lambda item: (item[1], item[2], item[0].title)):
+            _event, visible_start, visible_end = item
+            if current_group and visible_start >= current_group_end:
+                layouts.extend(allocate_timed_event_group(current_group))
+                current_group = []
+                current_group_end = DAY_START_HOUR
+            current_group.append(item)
+            current_group_end = max(current_group_end, visible_end)
+        if current_group:
+            layouts.extend(allocate_timed_event_group(current_group))
+
+    return sorted(
+        layouts,
+        key=lambda layout: (
+            layout.event.day,
+            layout.visible_start,
+            layout.visible_end,
+            layout.event.title,
+        ),
+    )
+
+
+def allocate_timed_event_group(group: list[tuple[Event, float, float]]) -> list[TimedEventLayout]:
+    lane_ends: list[float] = []
+    assigned: list[tuple[Event, float, float, int]] = []
+    for event, visible_start, visible_end in group:
+        lane = 0
+        while lane < len(lane_ends) and lane_ends[lane] > visible_start:
+            lane += 1
+        if lane == len(lane_ends):
+            lane_ends.append(visible_end)
+        else:
+            lane_ends[lane] = visible_end
+        assigned.append((event, visible_start, visible_end, lane))
+
+    lane_count = max(1, len(lane_ends))
+    return [
+        TimedEventLayout(event, visible_start, visible_end, lane, lane_count)
+        for event, visible_start, visible_end, lane in assigned
+    ]
+
+
+def horizontal_ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return min(a1, b1) - max(a0, b0) > 1
+
+
+def timed_event_boxes(
+    layouts: list[TimedEventLayout],
+    col_edges: list[int],
+    event_inset_x: int,
+    event_lane_gap: int,
+    grid_top: int,
+    grid_bottom: int,
+) -> list[TimedEventBox]:
+    duration_boxes: list[TimedEventBox] = []
+    for layout in layouts:
+        ev = layout.event
+        day_x0 = col_edges[ev.day] + event_inset_x
+        day_x1 = col_edges[ev.day + 1] - event_inset_x
+        usable_w = day_x1 - day_x0 - event_lane_gap * (layout.lane_count - 1)
+        lane_w = usable_w / layout.lane_count
+        x0 = day_x0 + layout.lane * (lane_w + event_lane_gap)
+        x1 = x0 + lane_w
+        y0 = time_y(layout.visible_start, grid_top, grid_bottom) + 2
+        y1 = time_y(layout.visible_end, grid_top, grid_bottom) - 2
+        if y1 - y0 < MIN_EVENT_ACCENT_HEIGHT:
+            y1 = min(grid_bottom, y0 + MIN_EVENT_ACCENT_HEIGHT)
+            if y1 - y0 < MIN_EVENT_ACCENT_HEIGHT:
+                y0 = max(grid_top, y1 - MIN_EVENT_ACCENT_HEIGHT)
+        duration_boxes.append(TimedEventBox(layout, x0, y0, x1, y1, grid_bottom))
+
+    boxes: list[TimedEventBox] = []
+    for box in duration_boxes:
+        next_y0 = grid_bottom + EVENT_TEXT_GAP_Y
+        for other in duration_boxes:
+            if other is box:
+                continue
+            if other.layout.event.day != box.layout.event.day:
+                continue
+            if other.y0 <= box.y0 + 1:
+                continue
+            if not horizontal_ranges_overlap(box.x0, box.x1, other.x0, other.x1):
+                continue
+            next_y0 = min(next_y0, other.y0)
+        text_y1 = min(grid_bottom, next_y0 - EVENT_TEXT_GAP_Y)
+        boxes.append(
+            TimedEventBox(
+                box.layout,
+                box.x0,
+                box.y0,
+                box.x1,
+                box.y1,
+                max(box.y0, text_y1),
+            )
+        )
+
+    return boxes
+
+
 def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, float]:
     now = localize_now(now)
     week_end = week_start + timedelta(days=6)
@@ -391,6 +548,154 @@ def current_marker(week_start: date, now: datetime | None = None) -> tuple[int, 
         day = min(6, max(0, (now.date() - week_start).days))
         hour = DAY_START_HOUR
     return day, min(DAY_END_HOUR, max(DAY_START_HOUR, hour))
+
+
+def time_label_for_width(
+    draw: ImageDraw.ImageDraw,
+    start: float,
+    end: float,
+    fnt: ImageFont.ImageFont,
+    max_w: int,
+) -> str:
+    label = f"{short_clock(start)}-{short_clock(end)}"
+    if text_wh(draw, label, fnt)[0] <= max_w:
+        return label
+    return ellipsize(draw, short_clock(start), fnt, max_w)
+
+
+def draw_event_text(
+    draw: ImageDraw.ImageDraw,
+    box: TimedEventBox,
+) -> None:
+    layout = box.layout
+    ev = layout.event
+    text_x = box.x0 + EVENT_ACCENT_WIDTH + EVENT_TEXT_OFFSET_X
+    text_y = box.y0 - 1
+    max_w = max(1, round(box.x1 - text_x))
+    available_h = box.text_y1 - text_y
+    box_w = box.x1 - box.x0
+    if max_w < 22 or available_h < 16:
+        return
+
+    compact_time = time_label_for_width(draw, layout.visible_start, layout.visible_end, F["tiny"], max_w)
+    if layout.lane_count > 1 or box_w < 150:
+        title_font = F["tiny"] if box_w < 104 else F["event_small"]
+        meta_font = F["tiny"]
+    else:
+        title_font = F["event"]
+        meta_font = F["event_small"]
+        compact_time = time_label_for_width(draw, layout.visible_start, layout.visible_end, meta_font, max_w)
+
+    if available_h < 58:
+        compact = f"{compact_time} {ev.title}"
+        line = ellipsize(draw, compact, meta_font, max_w)
+        draw.text((text_x, text_y), line, font=meta_font, fill=0)
+        return
+
+    time_label = ellipsize(draw, compact_time, meta_font, max_w)
+    draw.text((text_x, text_y), time_label, font=meta_font, fill=0)
+    ty = text_y + (22 if meta_font is F["tiny"] else 25)
+    line_h = 21 if title_font is F["tiny"] else 24 if title_font is F["event_small"] else 28
+    max_title_lines = min(2, max(0, int((box.text_y1 - ty) // line_h)))
+    for line in wrap(draw, ev.title, title_font, max_w)[:max_title_lines]:
+        draw.text((text_x, ty), ellipsize(draw, line, title_font, max_w), font=title_font, fill=0)
+        ty += line_h
+
+    if ev.where and box.text_y1 - ty > 20:
+        location = ellipsize(draw, ev.where, F["tiny"], max_w)
+        draw.text((text_x, ty), location, font=F["tiny"], fill=70)
+
+
+def draw_timed_event(draw: ImageDraw.ImageDraw, box: TimedEventBox) -> None:
+    accent_x1 = min(box.x1, box.x0 + EVENT_ACCENT_WIDTH)
+    rounded_rect(
+        draw,
+        (box.x0, box.y0, accent_x1, box.y1),
+        3,
+        fill=event_accent(box.layout.event.tone),
+    )
+    draw_event_text(draw, box)
+
+
+def clipped_segments(
+    x0: float,
+    x1: float,
+    blockers: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    segments = [(x0, x1)]
+    for block_x0, block_x1 in sorted(blockers):
+        next_segments: list[tuple[float, float]] = []
+        for segment_x0, segment_x1 in segments:
+            if block_x1 <= segment_x0 or block_x0 >= segment_x1:
+                next_segments.append((segment_x0, segment_x1))
+                continue
+            if segment_x0 < block_x0:
+                next_segments.append((segment_x0, block_x0))
+            if block_x1 < segment_x1:
+                next_segments.append((block_x1, segment_x1))
+        segments = next_segments
+    return segments
+
+
+def draw_current_marker(
+    draw: ImageDraw.ImageDraw,
+    *,
+    week_start: date,
+    now: datetime,
+    col_edges: list[int],
+    card_inset_x: int,
+    grid_top: int,
+    grid_bottom: int,
+    event_boxes: list[tuple[int, float, float, float, float]],
+) -> None:
+    marker_day, marker_hour = current_marker(week_start, now)
+    marker_y = round(time_y(marker_hour, grid_top, grid_bottom))
+    marker_x0 = col_edges[marker_day] + card_inset_x
+    marker_x1 = col_edges[marker_day + 1] - card_inset_x
+    marker_mid = round((marker_x0 + marker_x1) / 2)
+    event_blockers = [
+        (box_x0 - 3, box_x1 + 3)
+        for day, box_x0, box_y0, box_x1, box_y1 in event_boxes
+        if day == marker_day and box_y0 <= marker_y <= box_y1
+    ]
+    line_blockers = [*event_blockers, (marker_mid - 16, marker_mid + 16)]
+    for segment_x0, segment_x1 in clipped_segments(
+        marker_x0 + 8,
+        marker_x1 - 8,
+        line_blockers,
+    ):
+        if segment_x1 - segment_x0 >= 5:
+            draw.line((segment_x0, marker_y, segment_x1, marker_y), fill=0, width=2)
+
+    marker_mid_blocked = any(
+        block_x0 <= marker_mid <= block_x1
+        for block_x0, block_x1 in event_blockers
+    )
+    if not marker_mid_blocked:
+        draw.ellipse(
+            (marker_mid - 6, marker_y - 6, marker_mid + 6, marker_y + 6),
+            fill=255,
+            outline=0,
+            width=2,
+        )
+        draw.ellipse(
+            (marker_mid - 2, marker_y - 2, marker_mid + 2, marker_y + 2),
+            fill=0,
+        )
+
+    for direction in (-1, 1):
+        tip = marker_x0 + 2 if direction < 0 else marker_x1 - 2
+        inner = tip + direction * 18
+        wing = 7
+        draw.polygon(
+            [
+                (tip, marker_y),
+                (inner, marker_y - wing),
+                (inner - direction * 4, marker_y),
+                (inner, marker_y + wing),
+            ],
+            fill=0,
+        )
 
 
 def render_image(
@@ -409,18 +714,19 @@ def render_image(
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
 
-    margin_x = 58
+    margin_left = 38
+    margin_right = 42
     top = 46
     day_h = 286
     grid_top = top + day_h
     grid_bottom = H - 64
-    time_w = 84
-    grid_left = margin_x + time_w
-    grid_right = W - margin_x
-    col_w = (grid_right - grid_left) / 7
-    col_edges = [round(grid_left + i * col_w) for i in range(8)]
-    card_inset_x = 14
-    card_inset_y = 5
+    time_w = 72
+    grid_left = margin_left + time_w
+    grid_right = W - margin_right
+    current_day = local_now.date()
+    highlighted_day = (current_day - week_start).days if week_start <= current_day <= week_start + timedelta(days=6) else -1
+    col_edges = day_column_edges(grid_left, grid_right, highlighted_day)
+    card_inset_x = 10
     text_pad_x = 20
 
     # Fine paper grain.
@@ -429,8 +735,6 @@ def render_image(
 
     # Day headings with weather tucked beneath each printed date.
     day_top = top
-    current_day = local_now.date()
-    highlighted_day = (current_day - week_start).days if week_start <= current_day <= week_start + timedelta(days=6) else -1
     for i, (dow, date_label, _kind, _temp) in enumerate(days):
         dow, date_label, kind, temp = days[i]
         x0 = col_edges[i]
@@ -465,66 +769,31 @@ def render_image(
         draw.text((grid_left - 18 - tw, y - th / 2 - 2), label, font=F["time"], fill=0)
 
     # Events.
-    for ev in sorted(events, key=lambda event: (event.day, event.start, event.end, event.title)):
-        visible_start = max(DAY_START_HOUR, ev.start)
-        visible_end = min(DAY_END_HOUR, ev.end)
-        if visible_end <= DAY_START_HOUR or visible_start >= DAY_END_HOUR or visible_end <= visible_start:
-            continue
-
-        x0 = col_edges[ev.day] + card_inset_x
-        x1 = col_edges[ev.day + 1] - card_inset_x
-        y0 = time_y(visible_start, grid_top, grid_bottom) + card_inset_y
-        y1 = time_y(visible_end, grid_top, grid_bottom) - card_inset_y
-        if y1 - y0 < 34:
-            y0 = max(grid_top + card_inset_y, y1 - 34)
-        rounded_rect(draw, (x0, y0, x1, y1), 5, fill=event_fill(ev.tone))
-        start_h = int(visible_start)
-        start_m = int(round((visible_start - start_h) * 60))
-        end_h = int(visible_end)
-        end_m = int(round((visible_end - end_h) * 60))
-        time_text = f"{start_h % 12 or 12}:{start_m:02d}-{end_h % 12 or 12}:{end_m:02d}"
-        tx = x0 + text_pad_x
-        max_w = round(x1 - tx - text_pad_x)
-        box_h = y1 - y0
-        if box_h < 68:
-            compact_time = f"{short_clock(visible_start)}-{short_clock(visible_end)}"
-            compact = f"{compact_time} {ev.title}"
-            line = ellipsize(draw, compact, F["event_small"], max_w)
-            _, lh = text_wh(draw, line, F["event_small"])
-            draw.text((tx, y0 + (box_h - lh) / 2 - 2), line, font=F["event_small"], fill=0)
-        else:
-            ty = y0 + 8
-            draw.text((tx, ty), time_text, font=F["event_small"], fill=0)
-            ty += 25
-            for line in wrap(draw, ev.title, F["event"], max_w)[:2]:
-                draw.text((tx, ty), line, font=F["event"], fill=0)
-                ty += 28
-            if ev.where and y1 - ty > 22:
-                location = ellipsize(draw, ev.where, F["event_small"], max_w)
-                draw.text((tx, ty + 1), location, font=F["event_small"], fill=70)
-
-    marker_day, marker_hour = current_marker(week_start, local_now)
-    marker_y = round(time_y(marker_hour, grid_top, grid_bottom))
-    marker_x0 = col_edges[marker_day] + card_inset_x
-    marker_x1 = col_edges[marker_day + 1] - card_inset_x
-    marker_mid = round((marker_x0 + marker_x1) / 2)
-    draw.line((marker_x0 + 8, marker_y, marker_mid - 16, marker_y), fill=0, width=2)
-    draw.line((marker_mid + 16, marker_y, marker_x1 - 8, marker_y), fill=0, width=2)
-    draw.ellipse((marker_mid - 6, marker_y - 6, marker_mid + 6, marker_y + 6), fill=255, outline=0, width=2)
-    draw.ellipse((marker_mid - 2, marker_y - 2, marker_mid + 2, marker_y + 2), fill=0)
-    for direction in (-1, 1):
-        tip = marker_x0 + 2 if direction < 0 else marker_x1 - 2
-        inner = tip + direction * 18
-        wing = 7
-        draw.polygon(
-            [
-                (tip, marker_y),
-                (inner, marker_y - wing),
-                (inner - direction * 4, marker_y),
-                (inner, marker_y + wing),
-            ],
-            fill=0,
+    event_lane_gap = 8
+    event_boxes: list[tuple[int, float, float, float, float]] = []
+    layouts = allocate_timed_event_lanes(events)
+    for box in timed_event_boxes(layouts, col_edges, card_inset_x, event_lane_gap, grid_top, grid_bottom):
+        draw_timed_event(draw, box)
+        event_boxes.append(
+            (
+                box.layout.event.day,
+                box.x0,
+                box.y0,
+                min(box.x1, box.x0 + EVENT_ACCENT_WIDTH),
+                box.y1,
+            )
         )
+
+    draw_current_marker(
+        draw,
+        week_start=week_start,
+        now=local_now,
+        col_edges=col_edges,
+        card_inset_x=card_inset_x,
+        grid_top=grid_top,
+        grid_bottom=grid_bottom,
+        event_boxes=event_boxes,
+    )
     return img
 
 
